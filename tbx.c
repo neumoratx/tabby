@@ -55,6 +55,33 @@ HTSLIB_EXPORT
 const tbx_conf_t tbx_conf_vcf = { TBX_VCF, 1, 2, 0, '#', 0 };
 const tbx_conf_t tbx_conf_gaf = { TBX_GAF, 1, 6, 0, '#', 0 };
 
+/*
+ * TBX_SEQONLY preset: index by sequence/chromosome name only.
+ *
+ * Files using this preset have no start/end coordinate columns.  Every
+ * record on a given chromosome is mapped to the virtual position [0, 1)
+ * (0-based half-open) so that a whole-chromosome query retrieves all of
+ * them.  This is achieved by setting bc = ec = sc: tbx_parse1() detects
+ * the TBX_SEQONLY flag and synthesises beg=0 / end=1 rather than trying
+ * to parse integer coordinates out of the chromosome-name column.
+ *
+ * The conf written into the .tbi header stores bc = ec = sc so that a
+ * reader that doesn't know about TBX_SEQONLY can still identify the
+ * sequence column; the synthesised coordinates keep all records in the
+ * same bin, so a whole-chromosome query always works correctly.
+ *
+ * TBX_SEQONLY occupies bit 20, well clear of existing flags:
+ *   TBX_GENERIC = 0x0000, TBX_SAM = 0x0001, TBX_VCF = 0x0002,
+ *   TBX_UCSC    = 0x10000, TBX_GAF = 0x20000.
+ */
+#ifndef TBX_SEQONLY
+#define TBX_SEQONLY (1 << 20)
+#endif
+
+HTSLIB_EXPORT
+/* sc=1, bc=1, ec=1 — bc/ec equal sc; coordinates synthesised at parse time */
+const tbx_conf_t tbx_conf_seqonly = { TBX_SEQONLY, 1, 1, 1, '#', 0 };
+
 typedef struct {
     int64_t beg, end;
     char *ss, *se;
@@ -106,6 +133,19 @@ int tbx_parse1(const tbx_conf_t *conf, size_t len, char *line, tbx_intv_t *intv)
         if (line[i] == '\t' || line[i] == 0) {
             if (id == conf->sc) {
                 intv->ss = line + b; intv->se = line + i;
+                /*
+                 * TBX_SEQONLY: bc == ec == sc, so all three columns point at
+                 * the same field (the chromosome name).  Synthesise [0, 1)
+                 * rather than attempting to parse a chromosome name string as
+                 * an integer — which would always produce 0 / -1 and trigger
+                 * the "expected int" error path.  Break early so the bc/ec
+                 * branches below are never entered.
+                 */
+                if (conf->preset & TBX_SEQONLY) {
+                    intv->beg = 0;
+                    intv->end = 1;
+                    break;
+                }
             } else if (id == conf->bc) {
                 // here ->beg is 0-based.
                 if ((conf->preset&0xffff) == TBX_GAF){
@@ -333,7 +373,10 @@ static inline int get_intv(tbx_t *tbx, kstring_t *str, tbx_intv_t *intv, int is_
             case TBX_VCF: type = "TBX_VCF"; break;
             case TBX_GAF: type = "TBX_GAF"; break;
             case TBX_UCSC: type = "TBX_UCSC"; break;
-            default: type = "TBX_GENERIC"; break;
+            default:
+                type = (tbx->conf.preset & TBX_SEQONLY) ? "TBX_SEQONLY"
+                                                         : "TBX_GENERIC";
+                break;
         }
         if (hts_is_utf16_text(str))
             hts_log_error("Failed to parse %s: offending line appears to be encoded as UTF-16", type);

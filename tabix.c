@@ -46,6 +46,13 @@ DEALINGS IN THE SOFTWARE.  */
 #include "htslib/hts_log.h"
 #include "htslib/thread_pool.h"
 
+/* seqonly preset: index by chromosome name only, no coordinate columns.
+ * Defined in tbx.c; TBX_SEQONLY must match the value there. */
+#ifndef TBX_SEQONLY
+#define TBX_SEQONLY (1 << 20)
+#endif
+extern const tbx_conf_t tbx_conf_seqonly;
+
 //for easy coding
 #define RELEASE_TPOOL(X) { hts_tpool *ptr = (hts_tpool*)(X); if (ptr) { hts_tpool_destroy(ptr); } }
 #define bam_index_build3(fn, min_shift, nthreads) (sam_index_build3((fn), NULL, (min_shift), (nthreads)))
@@ -349,10 +356,27 @@ static int query_regions(args_t *args, tbx_conf_t *conf, char *fname, char **reg
                     error_errno("Failed to get sequence names list");
                 }
             }
+            /*
+             * TBX_SEQONLY: records are indexed at [0,1) on each chromosome.
+             * A bare chromosome name (no ':') must be expanded to "CHROM:1-1"
+             * (1-based, so the query window [0,1) in 0-based is covered) so
+             * that tbx_itr_querys performs a whole-chromosome fetch.
+             */
+            int is_seqonly = (tbx->conf.preset & TBX_SEQONLY) != 0;
             for (i=0; i<nregs; i++)
             {
                 int ret, found = 0;
-                hts_itr_t *itr = tbx_itr_querys(tbx, regs[i]);
+                char *region = regs[i];
+                kstring_t expanded = {0, 0, NULL};
+                if (is_seqonly && strchr(region, ':') == NULL) {
+                    if (ksprintf(&expanded, "%s:1-1", region) < 0) {
+                        RELEASE_TPOOL(tpool.pool);
+                        error_errno(NULL);
+                    }
+                    region = expanded.s;
+                }
+                hts_itr_t *itr = tbx_itr_querys(tbx, region);
+                free(expanded.s);
                 if ( !itr ) continue;
                 while ((ret = tbx_itr_next(fp, tbx, itr, &str)) >= 0)
                 {
@@ -591,7 +615,7 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "   -e, --end INT              column number for region end (if no end, set INT to -b) [5]\n");
     fprintf(fp, "   -f, --force                overwrite existing index without asking\n");
     fprintf(fp, "   -m, --min-shift INT        set minimal interval size for CSI indices to 2^INT [14]\n");
-    fprintf(fp, "   -p, --preset STR           gff, bed, sam, vcf, gaf\n");
+    fprintf(fp, "   -p, --preset STR           gff, bed, sam, vcf, gaf, seqonly\n");
     fprintf(fp, "   -s, --sequence INT         column number for sequence names (suppressed by -p) [1]\n");
     fprintf(fp, "   -S, --skip-lines INT       skip first INT lines [0]\n");
     fprintf(fp, "\n");
@@ -607,6 +631,11 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "       --separate-regions     separate the output by corresponding regions\n");
     fprintf(fp, "       --verbosity INT        set verbosity [3]\n");
     fprintf(fp, "   -@, --threads INT          number of additional threads to use [0]\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "The 'seqonly' preset (-p seqonly) indexes tab-delimited files by\n");
+    fprintf(fp, "sequence/chromosome name only. No start/end coordinate columns are\n");
+    fprintf(fp, "needed. Use -s to specify the chromosome column (default: 1).\n");
+    fprintf(fp, "Query with a bare name: tabix FILE chr1\n");
     fprintf(fp, "\n");
     return status;
 }
@@ -685,6 +714,7 @@ int main(int argc, char *argv[])
                 else if (strcmp(optarg, "sam") == 0) conf = tbx_conf_sam;
                 else if (strcmp(optarg, "vcf") == 0) conf = tbx_conf_vcf;
                 else if (strcmp(optarg, "gaf") == 0) conf = tbx_conf_gaf;
+                else if (strcmp(optarg, "seqonly") == 0) conf = tbx_conf_seqonly;
                 else if (strcmp(optarg, "bcf") == 0) detect = 1; // bcf is autodetected, preset is not needed
                 else if (strcmp(optarg, "bam") == 0) detect = 1; // same as bcf
                 else error("The preset string not recognised: '%s'\n", optarg);
@@ -833,6 +863,7 @@ int main(int argc, char *argv[])
     }
     else    // TBI index
     {
+        //CW:INDEXING
         switch (ret = tbx_index_build3(fname, NULL, min_shift, args.threads, &conf))
         {
             case 0:
