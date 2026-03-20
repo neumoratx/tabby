@@ -723,6 +723,9 @@ int main(int argc, char *argv[])
                 conf.sc = strtol(optarg,&tmp,10);
                 if ( *tmp ) error("Could not parse argument: -s %s\n", optarg);
                 detect = 0;
+                if (conf.preset & TBX_SEQONLY) {
+                    conf.bc = conf.ec = conf.sc;
+                }
                 break;
             case 'S':
                 new_line_skip = strtol(optarg,&tmp,10);
