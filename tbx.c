@@ -35,6 +35,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include "htslib/bgzf.h"
 #include "htslib/hts_endian.h"
 #include "hts_internal.h"
+#include "htslib/tbx_cw.h"
 
 #include "htslib/khash.h"
 KHASH_DECLARE(s2i, kh_cstr_t, int64_t)
@@ -82,11 +83,12 @@ HTSLIB_EXPORT
 /* sc=1, bc=1, ec=1 — bc/ec equal sc; coordinates synthesised at parse time */
 const tbx_conf_t tbx_conf_seqonly = { TBX_SEQONLY, 1, 1, 1, '#', 0 };
 
-typedef struct {
+//now in htslib/tbx_cw.h
+/*typedef struct {
     int64_t beg, end;
     char *ss, *se;
     int tid;
-} tbx_intv_t;
+} tbx_intv_t;*/
 
 static inline int get_tid(tbx_t *tbx, const char *ss, int is_add)
 {
