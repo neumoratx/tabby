@@ -45,7 +45,6 @@ DEALINGS IN THE SOFTWARE.  */
 #include "htslib/hts_defs.h"
 #include "htslib/hts_log.h"
 #include "htslib/thread_pool.h"
-#include "htslib/tbx_cw.h"
 
 /* seqonly preset: index by chromosome name only, no coordinate columns.
  * Defined in tbx.c; TBX_SEQONLY must match the value there. */
@@ -459,216 +458,6 @@ static int query_chroms(char *fname, int download)
     return 0;
 }
 
-/*
- * dump_blocks() -- scan a BGZF-compressed, tabix-indexed file and print a
- * summary of every compressed block in the file.  For each block we report:
- *
- *   compressed_offset  seq(s)  coord_start  coord_end  n_lines
- *
- * "compressed_offset" is the byte position of the block in the .gz file
- * (upper 48 bits of the BGZF virtual offset returned by bgzf_tell).
- *
- * The coordinate range [coord_start, coord_end] is the inclusive span of
- * all records whose *start* falls in this block (0-based, matching what
- * hts_idx_push receives).  Lines that cannot be parsed (header / comment
- * lines, skip lines) are counted but contribute no coordinate data.
- *
- * If multiple sequences appear in the same block they are listed
- * comma-separated.  A block that contains only header/comment lines is
- * printed with seq="." and coords "-1 -1".
- */
-static int dump_blocks(const char *fname, int download)
-{
-    int ftype = file_type(fname);
-    if (!(ftype & IS_TXT) && ftype != 0) {
-        fprintf(stderr, "[tabix] --dump-blocks only supports text (TBI) indexed files\n");
-        return 1;
-    }
-
-    /* Load the tabix index so we can resolve tid -> name. */
-    tbx_t *tbx = tbx_index_load3(fname, NULL, download ? HTS_IDX_SAVE_REMOTE : 0);
-    if (!tbx) {
-        fprintf(stderr, "[tabix] Could not load .tbi index of %s\n", fname);
-        return 1;
-    }
-
-    int nseq = 0;
-    const char **seqnames = tbx_seqnames(tbx, &nseq);
-    if (!seqnames) {
-        fprintf(stderr, "[tabix] Could not get sequence names\n");
-        tbx_destroy(tbx);
-        return 1;
-    }
-
-    /* Open the compressed data file for scanning. */
-    BGZF *fp = bgzf_open(fname, "r");
-    if (!fp) {
-        fprintf(stderr, "[tabix] Could not open %s\n", fname);
-        free(seqnames);
-        tbx_destroy(tbx);
-        return 1;
-    }
-
-    /* -- per-block accumulators -- */
-    int64_t  blk_compressed_off = 0;   /* compressed file offset of current block  */
-    int64_t  blk_coord_beg      = -1;  /* min beg seen in current block            */
-    int64_t  blk_coord_end      = -1;  /* max end seen in current block            */
-    int64_t  blk_nlines         = 0;   /* total lines (data + header) in block     */
-    int64_t  blk_uncomp_bytes   = 0;   /* uncompressed bytes consumed from block   */
-
-    /* Dynamic set of tids seen in the current block.
-     * We use a small sorted int array; genomes rarely have >64 sequences. */
-    int      blk_ntids          = 0;
-    int      blk_tids_cap       = 16;
-    int     *blk_tids           = malloc(blk_tids_cap * sizeof(int));
-    if (!blk_tids) {
-        fprintf(stderr, "[tabix] out of memory\n");
-        bgzf_close(fp);
-        free(seqnames);
-        tbx_destroy(tbx);
-        return 1;
-    }
-
-    /* Print TSV header */
-    printf("compressed_offset\tseq\tcoord_start\tcoord_end\tn_lines\tuncompressed_bytes\n");
-
-    kstring_t str = {0, 0, 0};
-    int64_t   lineno = 0;
-
-    /* Helper macro – flush the current block record to stdout */
-#define FLUSH_BLOCK() do { \
-    if (blk_nlines > 0) { \
-        if (blk_ntids == 0) { \
-            printf("%"PRId64"\t.\t-1\t-1\t%"PRId64"\t%"PRId64"\n", \
-                   blk_compressed_off, blk_nlines, blk_uncomp_bytes); \
-        } else { \
-            printf("%"PRId64"\t", blk_compressed_off); \
-            for (int _i = 0; _i < blk_ntids; _i++) { \
-                if (_i) putchar(','); \
-                int _tid = blk_tids[_i]; \
-                if (_tid >= 0 && _tid < nseq) \
-                    fputs(seqnames[_tid], stdout); \
-                else \
-                    printf("tid%d", _tid); \
-            } \
-            printf("\t%"PRId64"\t%"PRId64"\t%"PRId64"\t%"PRId64"\n", \
-                   blk_coord_beg, blk_coord_end, blk_nlines, blk_uncomp_bytes); \
-        } \
-    } \
-} while (0)
-
-    /* Initial virtual offset before the first read. */
-    uint64_t voff_after = (uint64_t)bgzf_tell(fp);
-    blk_compressed_off = (int64_t)(voff_after >> 16);
-
-    int ret;
-    while ((ret = bgzf_getline(fp, '\n', &str)) >= 0) {
-        ++lineno;
-        uint64_t voff_now = (uint64_t)bgzf_tell(fp);
-        int64_t  cur_blk  = (int64_t)(voff_now >> 16);
-
-        /* Detect block boundary: the virtual offset after reading this line
-         * has a higher compressed-block component than we started with. */
-        int crossed = (cur_blk != (int64_t)(voff_after >> 16));
-
-        /* Try to parse the line for genomic interval info. */
-        int is_data = 0;
-        tbx_intv_t intv;
-        if (str.l && str.s[0] != tbx->conf.meta_char &&
-            lineno > tbx->conf.line_skip) {
-            if (tbx_parse1(&tbx->conf, str.l, str.s, &intv) == 0) {
-                /* resolve sequence name -> tid */
-                char save = *intv.se;
-                *intv.se = '\0';
-                int tid = tbx_name2id(tbx, intv.ss);
-                *intv.se = save;
-
-                if (crossed) {
-                    /* This line belongs to the NEW block; flush old first.
-                     * voff_after & 0xFFFF is the uncompressed cursor position
-                     * within the old block just before this line was read —
-                     * i.e. the total uncompressed bytes consumed from it. */
-                    blk_uncomp_bytes = (int64_t)(voff_after & 0xFFFF);
-                    FLUSH_BLOCK();
-                    /* Reset accumulators for the new block.
-                     * voff_now & 0xFFFF is how far into the new block we are
-                     * after reading this crossing line. */
-                    blk_compressed_off = (int64_t)(voff_after >> 16);
-                    blk_coord_beg    = -1;
-                    blk_coord_end    = -1;
-                    blk_nlines       = 0;
-                    blk_ntids        = 0;
-                    blk_uncomp_bytes = (int64_t)(voff_now & 0xFFFF);
-                }
-
-                /* Accumulate into current block */
-                blk_nlines++;
-                is_data = 1;
-
-                /* Update coordinate range */
-                if (blk_coord_beg < 0 || intv.beg < blk_coord_beg)
-                    blk_coord_beg = intv.beg;
-                if (blk_coord_end < 0 || intv.end > blk_coord_end)
-                    blk_coord_end = intv.end;
-
-                /* Add tid to set if not already present */
-                if (tid >= 0) {
-                    int found = 0;
-                    for (int i = 0; i < blk_ntids; i++) {
-                        if (blk_tids[i] == tid) { found = 1; break; }
-                    }
-                    if (!found) {
-                        if (blk_ntids == blk_tids_cap) {
-                            blk_tids_cap *= 2;
-                            int *tmp = realloc(blk_tids, blk_tids_cap * sizeof(int));
-                            if (!tmp) {
-                                fprintf(stderr, "[tabix] out of memory\n");
-                                goto done;
-                            }
-                            blk_tids = tmp;
-                        }
-                        blk_tids[blk_ntids++] = tid;
-                    }
-                }
-            }
-        }
-
-        if (!is_data && crossed) {
-            /* A header/comment/skip line that crosses a block boundary:
-             * flush the old block, start a new one, count this line in it. */
-            blk_uncomp_bytes = (int64_t)(voff_after & 0xFFFF);
-            FLUSH_BLOCK();
-            blk_compressed_off = (int64_t)(voff_after >> 16);
-            blk_coord_beg    = -1;
-            blk_coord_end    = -1;
-            blk_nlines       = 1;   /* count this non-data line in the new block */
-            blk_ntids        = 0;
-            blk_uncomp_bytes = (int64_t)(voff_now & 0xFFFF);
-        } else if (!is_data) {
-            /* header/skip line within the same block – just count it */
-            blk_nlines++;
-        }
-
-        voff_after = voff_now;
-    }
-
-    /* Flush final block.
-     * voff_after was updated to voff_now at the end of the last iteration,
-     * so its low 16 bits are the uncompressed bytes consumed from this block. */
-    blk_uncomp_bytes = (int64_t)(voff_after & 0xFFFF);
-    FLUSH_BLOCK();
-
-#undef FLUSH_BLOCK
-
-done:
-    free(str.s);
-    free(blk_tids);
-    free(seqnames);
-    bgzf_close(fp);
-    tbx_destroy(tbx);
-    return 0;
-}
-
 int reheader_file(const char *fname, const char *header, int ftype, tbx_conf_t *conf, int threads)
 {
     hts_tpool *tpool = NULL;
@@ -834,7 +623,6 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "   -h, --print-header         print also the header lines\n");
     fprintf(fp, "   -H, --only-header          print only the header lines\n");
     fprintf(fp, "   -l, --list-chroms          list chromosome names\n");
-    fprintf(fp, "       --dump-blocks          print compressed block info (offset, seq(s), coord range, n_lines, uncompressed_bytes)\n");
     fprintf(fp, "   -r, --reheader FILE        replace the header with the content of FILE\n");
     fprintf(fp, "   -R, --regions FILE         restrict to regions listed in the file\n");
     fprintf(fp, "   -T, --targets FILE         similar to -R but streams rather than index-jumps\n");
@@ -854,7 +642,7 @@ static int usage(FILE *fp, int status)
 
 int main(int argc, char *argv[])
 {
-    int c, detect = 1, min_shift = 0, is_force = 0, list_chroms = 0, do_csi = 0, dump_blocks_flag = 0;
+    int c, detect = 1, min_shift = 0, is_force = 0, list_chroms = 0, do_csi = 0;
     tbx_conf_t conf = tbx_conf_gff;
     char *reheader = NULL;
     args_t args;
@@ -887,7 +675,6 @@ int main(int argc, char *argv[])
         {"cache", required_argument, NULL, 4},
         {"separate-regions", no_argument, NULL, 5},
         {"threads", required_argument, NULL, '@'},
-        {"dump-blocks", no_argument, NULL, 6},
         {NULL, 0, NULL, 0}
     };
 
@@ -972,9 +759,6 @@ int main(int argc, char *argv[])
             case 5:
                 args.separate_regs = 1;
                 break;
-            case 6:
-                dump_blocks_flag = 1;
-                break;
             case '@':   //thread count
                 args.threads = atoi(optarg);
                 break;
@@ -989,9 +773,6 @@ int main(int argc, char *argv[])
 
     if ( list_chroms )
         return query_chroms(argv[optind], args.download_index);
-
-    if ( dump_blocks_flag )
-        return dump_blocks(argv[optind], args.download_index);
 
     char *fname = argv[optind];
     int ftype = file_type(fname);
