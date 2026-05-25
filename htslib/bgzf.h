@@ -81,6 +81,20 @@ struct BGZF {
     int idx_build_otf;  // build index on the fly, set by bgzf_index_build_init()
     struct z_stream_s *gz_stream; // for gzip-compressed files
     int64_t seeked;     // virtual offset of last seek
+    /// Optional post-download, pre-decompression block filter.
+    ///
+    /// When non-NULL, called inside bgzf_read_block() after the compressed
+    /// bytes of a BGZF block have been read into compressed_block but before
+    /// inflate_block() is called.  If the callback returns non-zero the block
+    /// is skipped: inflate_block() is not called, block_length is left at 0,
+    /// and bgzf_read_block() loops to read the next block.  The callback is
+    /// only invoked in the single-threaded, BGZF-compressed (non-gzip) path.
+    ///
+    /// @param block_address  Compressed file offset of this block
+    /// @param data           Opaque pointer (decomp_skip_data)
+    /// @return               0 to decompress normally; non-zero to skip
+    int (*decomp_skip_func)(int64_t block_address, void *data);
+    void *decomp_skip_data;  ///< Passed verbatim to decomp_skip_func
 };
 #ifndef HTS_BGZF_TYPEDEF
 typedef struct BGZF BGZF;

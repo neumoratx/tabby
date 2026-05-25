@@ -4301,6 +4301,66 @@ int hts_itr_next(BGZF *fp, hts_itr_t *iter, void *r, void *data)
             }
             ++iter->i;
         }
+
+        /*
+         * Intra-chunk BGZF block filter.
+         *
+         * When block_filter_func is set and the BGZF stream is single-threaded
+         * and non-gzip (the only mode where bgzf_seek is a cheap OS seek and
+         * does not create a new HTTP range request or stall a reader thread),
+         * we apply the filter to the block we are about to read.
+         *
+         * The filter is only meaningful when fp->block_length == 0, which
+         * indicates that the stream is positioned at a block boundary — either
+         * because we just seeked there, or because bgzf_getline consumed the
+         * last byte of the previous block.  When block_length > 0 we are
+         * mid-block and must finish reading it; skipping mid-block is unsound
+         * because a line may span the boundary we would skip past.
+         *
+         * block_filter_func(addr, data) returns:
+         *   UINT64_MAX  — accept block at compressed offset addr
+         *   other       — skip; returned value is the next addr to try
+         *
+         * We iterate until either the callback accepts a block, we reach the
+         * current chunk end, or the callback returns a non-advancing address
+         * (which would loop forever — treat as a safety bail-out).
+         */
+        if (iter->block_filter_func
+                && !fp->mt
+                && !fp->is_gzip
+                && fp->block_length == 0) {
+            uint64_t chunk_end_blk = iter->off[iter->i].v >> 16;
+            uint64_t cur_blk = (uint64_t)fp->block_address;
+            for (;;) {
+                if (cur_blk > chunk_end_blk) {
+                    /* Skipped past the end of this chunk — force chunk advance. */
+                    iter->curr_off = iter->off[iter->i].v;
+                    break;
+                }
+                uint64_t next_blk = iter->block_filter_func(cur_blk,
+                                                             iter->block_filter_data);
+                if (next_blk == UINT64_MAX)
+                    break;   /* block accepted — read it normally */
+                /* Block rejected.  next_blk is where to try next. */
+                if (next_blk <= cur_blk || next_blk > chunk_end_blk) {
+                    /* Nowhere useful to go within this chunk — skip to end. */
+                    iter->curr_off = iter->off[iter->i].v;
+                    break;
+                }
+                /* Seek to the start of the next candidate block. */
+                if (bgzf_seek(fp, (int64_t)(next_blk << 16), SEEK_SET) < 0) {
+                    hts_log_error("Block-filter seek to offset %"PRIu64" failed%s%s",
+                                  next_blk << 16,
+                                  errno ? ": " : "", strerror(errno));
+                    iter->curr_off = iter->off[iter->i].v;  /* skip chunk safely */
+                    break;
+                }
+                cur_blk = next_blk;
+            }
+            /* Re-check whether curr_off pushed us past the chunk boundary. */
+            if (iter->curr_off >= iter->off[iter->i].v) continue;
+        }
+
         if ((ret = iter->readrec(fp, data, r, &tid, &beg, &end)) >= 0) {
             iter->curr_off = bgzf_tell(fp);
             if (tid != iter->tid || beg >= iter->end) { // no need to proceed

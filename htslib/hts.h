@@ -874,6 +874,31 @@ typedef int64_t hts_tell_func(void *fp);
  * tell       - File specific function for indicating the file offset
  */
 
+/// Callback for optional per-BGZF-block filtering inside hts_itr_next().
+///
+/// Called with the compressed block offset (block_address, i.e.
+/// bgzf_tell(fp) >> 16) of the block the *next* readrec call will start
+/// reading from.  The callback should inspect its per-block min/max data
+/// and decide whether the block can possibly contain records matching the
+/// caller's filter criteria.
+///
+/// Return value semantics:
+///   UINT64_MAX  — the block passes; hts_itr_next() will read it normally.
+///   any other   — the block should be skipped; the returned value is the
+///                 compressed offset of the next block to try.  hts_itr_next()
+///                 will seek to that address and call the callback again.
+///                 If the returned address equals block_address or exceeds
+///                 the current chunk's end, hts_itr_next() stops skipping.
+///
+/// The callback is invoked only in the single-threaded, non-gzip, BGZF path
+/// of hts_itr_next() (fp->mt == NULL && !fp->is_gzip).  It is never invoked
+/// when block_filter_func is NULL (the default).
+///
+/// @param block_address  Compressed offset of the candidate block (voff >> 16)
+/// @param data           Opaque pointer supplied by the caller
+/// @return               UINT64_MAX to accept; next block address to skip
+typedef uint64_t hts_block_filter_func(uint64_t block_address, void *data);
+
 typedef struct hts_itr_t {
     uint32_t read_rest:1, finished:1, is_cram:1, nocoor:1, multi:1, dummy:27;
     int tid, n_off, i, n_reg;
@@ -890,6 +915,9 @@ typedef struct hts_itr_t {
         int n, m;
         int *a;
     } bins;
+    /// Optional per-block filter (NULL → disabled). See hts_block_filter_func.
+    hts_block_filter_func *block_filter_func;
+    void                  *block_filter_data;  ///< Passed verbatim to block_filter_func
 } hts_itr_t;
 
 typedef hts_itr_t hts_itr_multi_t;

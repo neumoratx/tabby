@@ -1215,6 +1215,25 @@ int bgzf_read_block(BGZF *fp)
             return -1;
         }
         size += count;
+        /*
+         * Post-download, pre-decompression block filter.
+         *
+         * If decomp_skip_func is set and returns non-zero for this block,
+         * we skip decompression entirely.  The compressed bytes are already
+         * in memory (downloaded), but we avoid the inflate_block() CPU cost.
+         * We reset block_address to the current file position (start of the
+         * next block) and continue the loop to read the next header.
+         *
+         * This is only reachable in the single-threaded, BGZF-compressed
+         * path — gzip and MT paths branch away before reaching here.
+         * idx_build_otf is also skipped for filtered blocks: we have no
+         * uncompressed length to record, and the block is being discarded.
+         */
+        if (fp->decomp_skip_func
+                && fp->decomp_skip_func(block_address, fp->decomp_skip_data)) {
+            block_address = bgzf_htell(fp);  /* advance past the skipped block */
+            continue;                         /* loop back to read next header  */
+        }
         if ((count = inflate_block(fp, block_length)) < 0) {
             hts_log_debug("Inflate block operation failed for "
                           "block at offset %"PRId64": %s",
