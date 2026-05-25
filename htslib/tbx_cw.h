@@ -61,6 +61,7 @@ typedef struct {
 
 int tbx_parse1(const tbx_conf_t *conf, size_t len, char *line, tbx_intv_t *intv);
 static int64_t sidx_block_index_from_offset(uint64_t blk_off, const uint64_t *sidx_blk_offsets, uint64_t n_blocks);
+static size_t sidx_type_size(uint8_t tc);
 
 #ifdef __cplusplus
 }
