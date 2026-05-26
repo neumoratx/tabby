@@ -71,9 +71,10 @@ typedef enum {
 } FilterOp;
 
 typedef struct {
-    int      col;   /* 0-based column index              */
-    FilterOp op;    /* comparison operator                */
-    double   val;   /* numeric threshold (always double)  */
+    int      col;   /* 0-based column index                          */
+    FilterOp op;    /* comparison operator                            */
+    double   val;   /* numeric threshold (numeric filters only)       */
+    char    *sval;  /* string value (string filters only; NULL if numeric) */
 } filter_expr_t;
 
 typedef struct
@@ -415,7 +416,7 @@ static int tbx_parse_filter(args_t *args, const char *expr)
         return -1;
     }
 
-    /* Parse the numeric value. */
+    /* Parse the value: try numeric first; fall back to string. */
     if (!*end) {
         fprintf(stderr, "[tabix] -F: missing value after operator in '%s'\n",
                 expr);
@@ -424,10 +425,15 @@ static int tbx_parse_filter(args_t *args, const char *expr)
     char *vend;
     errno = 0;
     double val = strtod(end, &vend);
-    if (errno || vend == end || *vend != '\0') {
-        fprintf(stderr, "[tabix] -F: cannot parse numeric value '%s' in "
-                        "expression '%s'\n", end, expr);
-        return -1;
+    int is_string = (errno != 0 || vend == end || *vend != '\0');
+
+    if (is_string) {
+        /* String filters only support == and !=; >=/<= have no defined ordering. */
+        if (op != FILT_EQ && op != FILT_NE) {
+            fprintf(stderr, "[tabix] -F: string filters only support == and !=; "
+                            "got '%s'\n", expr);
+            return -1;
+        }
     }
 
     /* Append to args->filters[]. */
@@ -439,9 +445,17 @@ static int tbx_parse_filter(args_t *args, const char *expr)
         return -1;
     }
     args->filters = tmp;
-    args->filters[args->nfilters].col = (int)col;
-    args->filters[args->nfilters].op  = op;
-    args->filters[args->nfilters].val = val;
+    args->filters[args->nfilters].col  = (int)col;
+    args->filters[args->nfilters].op   = op;
+    args->filters[args->nfilters].val  = is_string ? 0.0 : val;
+    args->filters[args->nfilters].sval = NULL;
+    if (is_string) {
+        args->filters[args->nfilters].sval = strdup(end);
+        if (!args->filters[args->nfilters].sval) {
+            fprintf(stderr, "[tabix] -F: out of memory\n");
+            return -1;
+        }
+    }
     args->nfilters++;
     return 0;
 }
@@ -501,36 +515,47 @@ static int tbx_apply_filters(const args_t *args,
         const char *field_end = tab ? tab : lend;
         size_t      flen      = (size_t)(field_end - p);
 
-        /* Parse the field value as a double. */
-        char field_buf[64];
-        if (flen == 0 || flen >= sizeof(field_buf)) {
-            fprintf(stderr,
-                    "[tabix] -F: column %d value is non-numeric or empty; "
-                    "string columns are not supported\n", f->col);
-            return 0;
-        }
-        memcpy(field_buf, p, flen);
-        field_buf[flen] = '\0';
-
-        char *nend;
-        errno = 0;
-        double field_val = strtod(field_buf, &nend);
-        if (errno || nend == field_buf || *nend != '\0') {
-            fprintf(stderr,
-                    "[tabix] -F: column %d value '%s' is non-numeric; "
-                    "string columns are not supported\n",
-                    f->col, field_buf);
-            return 0;
-        }
-
-        /* Apply the operator. */
+        /* Apply the filter: string or numeric path. */
         int pass;
-        switch (f->op) {
-            case FILT_EQ: pass = (field_val == f->val); break;
-            case FILT_NE: pass = (field_val != f->val); break;
-            case FILT_GE: pass = (field_val >= f->val); break;
-            case FILT_LE: pass = (field_val <= f->val); break;
-            default:      pass = 1; break;
+        if (f->sval) {
+            /* String filter: compare field bytes directly to avoid a copy. */
+            size_t slen = strlen(f->sval);
+            int eq = (flen == slen && memcmp(p, f->sval, flen) == 0);
+            switch (f->op) {
+                case FILT_EQ: pass = eq;  break;
+                case FILT_NE: pass = !eq; break;
+                default:      pass = 0;   break;  /* unreachable: caught at parse time */
+            }
+        } else {
+            /* Numeric filter. */
+            char field_buf[64];
+            if (flen == 0 || flen >= sizeof(field_buf)) {
+                fprintf(stderr,
+                        "[tabix] -F: column %d value is empty or too long for "
+                        "a numeric filter\n", f->col);
+                return 0;
+            }
+            memcpy(field_buf, p, flen);
+            field_buf[flen] = '\0';
+
+            char *nend;
+            errno = 0;
+            double field_val = strtod(field_buf, &nend);
+            if (errno || nend == field_buf || *nend != '\0') {
+                fprintf(stderr,
+                        "[tabix] -F: column %d value '%s' is non-numeric; "
+                        "use a string filter (== or !=) for string columns\n",
+                        f->col, field_buf);
+                return 0;
+            }
+
+            switch (f->op) {
+                case FILT_EQ: pass = (field_val == f->val); break;
+                case FILT_NE: pass = (field_val != f->val); break;
+                case FILT_GE: pass = (field_val >= f->val); break;
+                case FILT_LE: pass = (field_val <= f->val); break;
+                default:      pass = 1; break;
+            }
         }
         if (!pass) return 0;
     }
@@ -642,6 +667,9 @@ static void tbx_filter_chunks(const args_t *args,
         int chunk_dropped = 0;
         for (int fi = 0; fi < args->nfilters && !chunk_dropped; fi++) {
             const filter_expr_t *f = &args->filters[fi];
+
+            /* String filters have no numeric min/max in the sidx — skip. */
+            if (f->sval) continue;
 
             /* Only block-filter numeric columns that are within ncols. */
             if ((uint32_t)f->col >= sidx->ncols) continue;
@@ -776,6 +804,7 @@ static uint64_t sidx_block_filter_cb(uint64_t block_address, void *data)
     for (int fi = 0; fi < st->nfilters; fi++) {
         const filter_expr_t *f = &st->filters[fi];
 
+        if (f->sval) continue;  /* no block-level filtering for string filters */
         if ((uint32_t)f->col >= sidx->ncols) continue;
         uint8_t tc_min = sidx->col_min_tc[f->col];
         uint8_t tc_max = sidx->col_max_tc[f->col];
@@ -900,6 +929,7 @@ static int bgzf_decomp_skip_cb(int64_t block_address, void *data)
     for (int fi = 0; fi < st->nfilters; fi++) {
         const filter_expr_t *f = &st->filters[fi];
 
+        if (f->sval) continue;  /* no block-level filtering for string filters */
         if ((uint32_t)f->col >= sidx->ncols) continue;
         uint8_t tc_min = sidx->col_min_tc[f->col];
         uint8_t tc_max = sidx->col_max_tc[f->col];
@@ -2530,7 +2560,8 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "       --separate-regions     separate the output by corresponding regions\n");
     fprintf(fp, "   -F, --filter EXPR          filter records by column value; EXPR format:\n");
     fprintf(fp, "                              <col><op><val>, col is 0-based, op is ==|!=|>=|<=,\n");
-    fprintf(fp, "                              val is numeric. Repeatable. Example: -F \"3<=12.5\"\n");
+    fprintf(fp, "                              val is numeric or a string (strings: == and != only).\n");
+    fprintf(fp, "                              Repeatable. Examples: -F \"3<=12.5\" -F \"2==chr1\"\n");
     fprintf(fp, "       --verbosity INT        set verbosity [3]\n");
     fprintf(fp, "   -@, --threads INT          number of additional threads to use [0]\n");
     fprintf(fp, "\n");
@@ -2736,6 +2767,8 @@ int main(int argc, char *argv[])
 
         int qret = query_regions(&args, &conf, fname, regs, nregs, sidx_ptr);
         sidx_free(&sidx);
+        for (int i = 0; i < args.nfilters; i++)
+            free(args.filters[i].sval);
         free(args.filters);
         return qret;
     }
