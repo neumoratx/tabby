@@ -7,8 +7,9 @@
 #   sidx_free()            -- called automatically after every query
 #   tbx_filter_chunks()    -- chunk-level pruning with all four filter ops
 #   sidx_block_filter_cb() -- block-level callback for local-file queries
-#   tbx_apply_filters()    -- per-row exact check; string/OOB column handling
-#   tbx_parse_filter()     -- -F expression parsing; all error paths
+#   tbx_apply_filters()    -- per-row exact check; string/numeric/OOB column handling
+#   tbx_parse_filter()     -- -F expression parsing; all error paths including
+#                             string filters (== and != only)
 #   coltype_to_sidx()      -- type-code mapping (exercised by dump_blocks)
 #   sidx_write_min/max()   -- value serialisation (exercised by dump_blocks)
 #   col_update()           -- type narrowing; boolean/int32/float/double paths
@@ -80,6 +81,7 @@ cleanup() {
     rm -f sidx_notbi.tsv.gz
     rm -f sidx_dump.out sidx_types_dump.out sidx_same_dump.out
     rm -f sidx_exp_*.tsv
+    rm -f sidx_exp_str_*.tsv
     rm -f "${TMP}".*
 }
 
@@ -158,6 +160,11 @@ awk '$1=="chr1" && $5 <= 1010'    sidx_data.tsv > sidx_exp_score_le1010.tsv
 awk '$1=="chr2" && $5 >= 14990'   sidx_data.tsv > sidx_exp_score_ge14990.tsv
 awk '$1=="chr1" && $6 >= 49.0'    sidx_data.tsv > sidx_exp_qual_ge49.tsv
 > sidx_exp_empty.tsv  # empty file: expected output when filter eliminates all
+
+# ── Expected files for string filter tests ──
+awk '$1=="chr1" && $2==2000'      sidx_data.tsv > sidx_exp_str_name_2000.tsv
+printf 'chr1\t1\t1\tA\t42\t1.00\nchr1\t3\t3\tC\t42\t3.00\n' > sidx_exp_str_same_neqB.tsv
+printf 'chr1\t2\t2\tB\t42\t2.00\n'                            > sidx_exp_str_same_eqB.tsv
 
 # ── Run dump_blocks once per file and capture TSV output ──
 # (dump_blocks also creates the .sidx binary beside the .gz file)
@@ -298,11 +305,11 @@ echo ""
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- Section 3: tbx_apply_filters edge cases ---"
 
-# String column (col_0 = CHROM):
-#   Block level: col_min_tc == 0 (string) → skipped conservatively (block kept).
-#   Row level: "chr1" is non-numeric → tbx_apply_filters prints error and
-#              returns 0 → every row is dropped → empty output.
-check_out "string column filter drops all rows (col_0 >= 0)" \
+# Numeric filter applied to a string column (col_0 = CHROM):
+#   Block level: col_min_tc == 0 (string) → skipped conservatively.
+#   Row level: "chr1" is non-numeric → tbx_apply_filters prints an error
+#              suggesting a string filter and returns 0 → all rows dropped.
+check_out "numeric filter on string column drops all rows (col_0 >= 0)" \
     sidx_exp_empty.tsv \
     "$TABIX" -F "0>=0" sidx_data.tsv.gz chr1:1000-4999
 
@@ -355,13 +362,74 @@ check_fail "bad filter: unrecognised operator (4!!5)" \
 check_fail "bad filter: missing value after operator (4>=)" \
     "$TABIX" -F "4>=" sidx_data.tsv.gz chr1:1000-1001
 
-# Non-numeric value: strtod("abc") → vend==end → error.
-check_fail "bad filter: non-numeric value (4>=abc)" \
+# String value with ordered operator: strtod("abc") fails → is_string=1, but
+# op is FILT_GE (>=) which is not permitted for strings → error.
+check_fail "bad filter: string value with >= (4>=abc)" \
     "$TABIX" -F "4>=abc" sidx_data.tsv.gz chr1:1000-1001
+
+# Same check for <= with a string value.
+check_fail "bad filter: string value with <= (4<=word)" \
+    "$TABIX" -F "4<=word" sidx_data.tsv.gz chr1:1000-1001
 
 # Negative column index: col < 0 check in tbx_parse_filter → error.
 check_fail "bad filter: negative column index (-1>=5)" \
     "$TABIX" -F "-1>=5" sidx_data.tsv.gz chr1:1000-1001
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 6: String filter support (== and != only)
+#   Exercises: tbx_parse_filter string path, tbx_apply_filters string branch,
+#              block-level functions skipping string filters (f->sval != NULL).
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 6: string -F filters (== and !=) ---"
+
+# Rebuild the sidx for sidx_data (removed in Section 4).
+$TABIX --dump-blocks sidx_data.tsv.gz >/dev/null 2>/dev/null \
+    || die "dump_blocks sidx_data for Section 6"
+
+# FILT_EQ on CHROM (col 0): query is already restricted to chr1 by the TBI
+# primary index, so 0==chr1 keeps every row in the result.
+check_out "string FILT_EQ on CHROM passes all matching rows (0==chr1)" \
+    sidx_exp_chr1_all.tsv \
+    "$TABIX" -F "0==chr1" sidx_data.tsv.gz chr1:1000-4999
+
+# FILT_NE on CHROM: within a chr1 query, 0!=chr1 rejects every row → empty.
+check_out "string FILT_NE on CHROM rejects all rows in region (0!=chr1)" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "0!=chr1" sidx_data.tsv.gz chr1:1000-4999
+
+# FILT_EQ on NAME (col 3): only one record has NAME==row_2000.
+check_out "string FILT_EQ on NAME selects single record (3==row_2000)" \
+    sidx_exp_str_name_2000.tsv \
+    "$TABIX" -F "3==row_2000" sidx_data.tsv.gz chr1:2000-2000
+
+# sidx_same tests: three rows A/B/C, all SCORE=42.
+# String FILT_EQ: keep only row B.
+check_out "string FILT_EQ selects single row by name (3==B)" \
+    sidx_exp_str_same_eqB.tsv \
+    "$TABIX" -F "3==B" sidx_same.tsv.gz chr1:1-3
+
+# String FILT_NE: reject row B, keep A and C.
+check_out "string FILT_NE rejects named row, keeps others (3!=B)" \
+    sidx_exp_str_same_neqB.tsv \
+    "$TABIX" -F "3!=B" sidx_same.tsv.gz chr1:1-3
+
+# Block-level functions must skip string filters (no numeric min/max in sidx).
+# Combine a numeric filter that prunes blocks with a string filter that only
+# acts at row level.  The numeric filter 4!=42 would drop the entire chunk
+# (Section 2 test) but with 3==B added, the string filter must not interfere
+# with the block pruning decision — the chunk is still dropped by 4!=42.
+check_out "string filter does not block block-level pruning by numeric filter" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "4!=42" -F "3==B" sidx_same.tsv.gz chr1:1-3
+
+# Verify string filter alone does NOT trigger block-level pruning:
+# 3==Z matches nothing, but the rows are checked at apply time (not pruned
+# as a chunk) → result is empty, exit 0.
+check_out "string FILT_EQ with no match returns empty output (3==Z)" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "3==Z" sidx_same.tsv.gz chr1:1-3
 
 echo ""
 
