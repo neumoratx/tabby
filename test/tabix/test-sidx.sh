@@ -78,6 +78,7 @@ cleanup() {
     rm -f sidx_data.tsv sidx_data.tsv.gz sidx_data.tsv.gz.tbi sidx_data.tsv.gz.sidx
     rm -f sidx_types.tsv sidx_types.tsv.gz sidx_types.tsv.gz.tbi sidx_types.tsv.gz.sidx
     rm -f sidx_same.tsv sidx_same.tsv.gz sidx_same.tsv.gz.tbi sidx_same.tsv.gz.sidx
+    rm -f sidx_seqonly.tsv sidx_seqonly.tsv.gz sidx_seqonly.tsv.gz.tbi
     rm -f sidx_notbi.tsv.gz
     rm -f sidx_dump.out sidx_types_dump.out sidx_same_dump.out
     rm -f sidx_exp_*.tsv
@@ -172,6 +173,25 @@ printf 'chr1\t2\t2\tB\t42\t2.00\n'                            > sidx_exp_str_sam
 awk '$1=="chr1" && $2>=1000 && $2<=1999' sidx_data.tsv > sidx_exp_re_row1xxx.tsv
 # !~ on NAME: chr1 rows whose NAME does NOT start with row_1
 awk '$1=="chr1" && $2>=2000 && $2<=4999' sidx_data.tsv > sidx_exp_re_not_row1xxx.tsv
+
+# ── sidx_seqonly.tsv: seqonly-indexed file (-p seqonly) ──
+#
+# 5 columns (0-based):
+#   0: GENE   string (the indexed key — treated as the "chromosome")
+#   1: CHROM  string
+#   2: START  int
+#   3: END    int
+#   4: TYPE   string (protein_coding / lncRNA / rRNA)
+#
+# Mix of types so string/regex filters have meaningful pass/fail behaviour.
+printf 'GeneA\tchr1\t1000\t2000\tprotein_coding\n' >  sidx_seqonly.tsv
+printf 'GeneB\tchr1\t3000\t4000\tlncRNA\n'         >> sidx_seqonly.tsv
+printf 'GeneC\tchr2\t5000\t6000\tprotein_coding\n' >> sidx_seqonly.tsv
+printf 'GeneD\tchr2\t7000\t8000\trRNA\n'           >> sidx_seqonly.tsv
+printf 'GeneE\tchr3\t9000\t9500\tprotein_coding\n' >> sidx_seqonly.tsv
+
+$BGZIP -c sidx_seqonly.tsv > sidx_seqonly.tsv.gz || die "bgzip sidx_seqonly"
+$TABIX -f -p seqonly sidx_seqonly.tsv.gz          || die "tabix index sidx_seqonly"
 
 # ── Run dump_blocks once per file and capture TSV output ──
 # (dump_blocks also creates the .sidx binary beside the .gz file)
@@ -524,6 +544,53 @@ awk '$4=="row_4999"' sidx_data.tsv > sidx_exp_whole_re_row4999.tsv
 check_out "whole-file regex filter (no region, 3~=^row_4999\$)" \
     sidx_exp_whole_re_row4999.tsv \
     "$TABIX" -F "3~=^row_4999\$" sidx_data.tsv.gz
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 9: Whole-file -F scan on seqonly-indexed files
+#
+#   seqonly files index by gene/sequence name only (no position columns).
+#   The "." all-records wildcard must NOT be expanded to ".:1-1" by the seqonly
+#   expansion code — doing so looks for a literal sequence named "." and finds
+#   nothing.  The fix: skip expansion when region == ".".
+#
+#   Also verifies that named-gene queries still work normally after the fix.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 9: whole-file -F scan on seqonly-indexed file ---"
+
+# Named-gene query (sanity check — confirms the index works at all).
+check_out "seqonly: named-gene query returns correct row (GeneC)" \
+    <(grep '^GeneC' sidx_seqonly.tsv) \
+    "$TABIX" sidx_seqonly.tsv.gz GeneC
+
+# Whole-file string == filter: two genes are protein_coding.
+grep 'protein_coding' sidx_seqonly.tsv > sidx_exp_seqonly_pc.tsv
+check_out "seqonly: whole-file string FILT_EQ (4==protein_coding)" \
+    sidx_exp_seqonly_pc.tsv \
+    "$TABIX" -F "4==protein_coding" sidx_seqonly.tsv.gz
+
+# Whole-file string != filter: excludes protein_coding, keeps lncRNA and rRNA.
+grep -v 'protein_coding' sidx_seqonly.tsv > sidx_exp_seqonly_non_pc.tsv
+check_out "seqonly: whole-file string FILT_NE (4!=protein_coding)" \
+    sidx_exp_seqonly_non_pc.tsv \
+    "$TABIX" -F "4!=protein_coding" sidx_seqonly.tsv.gz
+
+# Whole-file regex filter: TYPE matches RNA (lncRNA and rRNA).
+grep 'RNA' sidx_seqonly.tsv > sidx_exp_seqonly_rna.tsv
+check_out "seqonly: whole-file regex FILT_RE (4~=RNA)" \
+    sidx_exp_seqonly_rna.tsv \
+    "$TABIX" -F "4~=RNA" sidx_seqonly.tsv.gz
+
+# Whole-file regex !~ filter: TYPE does NOT match RNA → protein_coding rows.
+check_out "seqonly: whole-file regex FILT_NRE (4!~RNA)" \
+    sidx_exp_seqonly_pc.tsv \
+    "$TABIX" -F "4!~RNA" sidx_seqonly.tsv.gz
+
+# Filter that matches nothing → empty output, exit 0.
+check_out "seqonly: whole-file filter with no match returns empty (4==miRNA)" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "4==miRNA" sidx_seqonly.tsv.gz
 
 echo ""
 
