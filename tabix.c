@@ -1202,7 +1202,7 @@ static int query_regions(args_t *args, tbx_conf_t *conf, char *fname, char **reg
                 int ret, found = 0;
                 char *region = regs[i];
                 kstring_t expanded = {0, 0, NULL};
-                if (is_seqonly && strchr(region, ':') == NULL) {
+                if (is_seqonly && strchr(region, ':') == NULL && strcmp(region, ".") != 0) {
                     if (ksprintf(&expanded, "%s:1-1", region) < 0) {
                         RELEASE_TPOOL(tpool.pool);
                         error_errno(NULL);
