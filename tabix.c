@@ -37,6 +37,7 @@ DEALINGS IN THE SOFTWARE.  */
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <regex.h>
 #include "htslib/tbx.h"
 #include "htslib/sam.h"
 #include "htslib/vcf.h"
@@ -68,13 +69,17 @@ typedef enum {
     FILT_NE,       /* != */
     FILT_GE,       /* >= */
     FILT_LE,       /* <= */
+    FILT_RE,       /* ~= (regex match)    */
+    FILT_NRE,      /* !~ (regex no-match) */
 } FilterOp;
 
 typedef struct {
-    int      col;   /* 0-based column index                          */
-    FilterOp op;    /* comparison operator                            */
-    double   val;   /* numeric threshold (numeric filters only)       */
-    char    *sval;  /* string value (string filters only; NULL if numeric) */
+    int      col;         /* 0-based column index                              */
+    FilterOp op;          /* comparison operator                                */
+    double   val;         /* numeric threshold (numeric filters only)           */
+    char    *sval;        /* string/regex value (non-numeric filters; NULL if numeric) */
+    regex_t  compiled_re; /* compiled regex (FILT_RE / FILT_NRE only)          */
+    int      has_regex;   /* 1 if compiled_re is valid and must be freed        */
 } filter_expr_t;
 
 typedef struct
@@ -406,31 +411,39 @@ static int tbx_parse_filter(args_t *args, const char *expr)
 
     /* Parse the two-character operator. */
     FilterOp op;
-    if      (end[0] == '=' && end[1] == '=') { op = FILT_EQ; end += 2; }
-    else if (end[0] == '!' && end[1] == '=') { op = FILT_NE; end += 2; }
-    else if (end[0] == '>' && end[1] == '=') { op = FILT_GE; end += 2; }
-    else if (end[0] == '<' && end[1] == '=') { op = FILT_LE; end += 2; }
+    if      (end[0] == '=' && end[1] == '=') { op = FILT_EQ;  end += 2; }
+    else if (end[0] == '!' && end[1] == '=') { op = FILT_NE;  end += 2; }
+    else if (end[0] == '>' && end[1] == '=') { op = FILT_GE;  end += 2; }
+    else if (end[0] == '<' && end[1] == '=') { op = FILT_LE;  end += 2; }
+    else if (end[0] == '~' && end[1] == '=') { op = FILT_RE;  end += 2; }
+    else if (end[0] == '!' && end[1] == '~') { op = FILT_NRE; end += 2; }
     else {
         fprintf(stderr, "[tabix] -F: unrecognised operator in '%s' "
-                        "(expected ==, !=, >=, or <=)\n", expr);
+                        "(expected ==, !=, >=, <=, ~=, or !~)\n", expr);
         return -1;
     }
 
-    /* Parse the value: try numeric first; fall back to string. */
+    /* Parse the value: regex operators always take a string; others try numeric
+     * first and fall back to string. */
     if (!*end) {
         fprintf(stderr, "[tabix] -F: missing value after operator in '%s'\n",
                 expr);
         return -1;
     }
-    char *vend;
-    errno = 0;
-    double val = strtod(end, &vend);
-    int is_string = (errno != 0 || vend == end || *vend != '\0');
 
-    if (is_string) {
-        /* String filters only support == and !=; >=/<= have no defined ordering. */
-        if (op != FILT_EQ && op != FILT_NE) {
-            fprintf(stderr, "[tabix] -F: string filters only support == and !=; "
+    int is_string = 0;
+    double val = 0.0;
+
+    if (op == FILT_RE || op == FILT_NRE) {
+        is_string = 1;   /* regex operators always treat value as a pattern */
+    } else {
+        char *vend;
+        errno = 0;
+        val = strtod(end, &vend);
+        is_string = (errno != 0 || vend == end || *vend != '\0');
+
+        if (is_string && op != FILT_EQ && op != FILT_NE) {
+            fprintf(stderr, "[tabix] -F: string filters only support ==, !=, ~=, and !~; "
                             "got '%s'\n", expr);
             return -1;
         }
@@ -445,15 +458,31 @@ static int tbx_parse_filter(args_t *args, const char *expr)
         return -1;
     }
     args->filters = tmp;
-    args->filters[args->nfilters].col  = (int)col;
-    args->filters[args->nfilters].op   = op;
-    args->filters[args->nfilters].val  = is_string ? 0.0 : val;
-    args->filters[args->nfilters].sval = NULL;
+    filter_expr_t *f = &args->filters[args->nfilters];
+    f->col       = (int)col;
+    f->op        = op;
+    f->val       = is_string ? 0.0 : val;
+    f->sval      = NULL;
+    f->has_regex = 0;
+
     if (is_string) {
-        args->filters[args->nfilters].sval = strdup(end);
-        if (!args->filters[args->nfilters].sval) {
+        f->sval = strdup(end);
+        if (!f->sval) {
             fprintf(stderr, "[tabix] -F: out of memory\n");
             return -1;
+        }
+        if (op == FILT_RE || op == FILT_NRE) {
+            int rc = regcomp(&f->compiled_re, end, REG_EXTENDED | REG_NOSUB);
+            if (rc != 0) {
+                char errbuf[256];
+                regerror(rc, &f->compiled_re, errbuf, sizeof(errbuf));
+                fprintf(stderr, "[tabix] -F: invalid regex '%s': %s\n",
+                        end, errbuf);
+                free(f->sval);
+                f->sval = NULL;
+                return -1;
+            }
+            f->has_regex = 1;
         }
     }
     args->nfilters++;
@@ -518,13 +547,38 @@ static int tbx_apply_filters(const args_t *args,
         /* Apply the filter: string or numeric path. */
         int pass;
         if (f->sval) {
-            /* String filter: compare field bytes directly to avoid a copy. */
-            size_t slen = strlen(f->sval);
-            int eq = (flen == slen && memcmp(p, f->sval, flen) == 0);
-            switch (f->op) {
-                case FILT_EQ: pass = eq;  break;
-                case FILT_NE: pass = !eq; break;
-                default:      pass = 0;   break;  /* unreachable: caught at parse time */
+            if (f->has_regex) {
+                /* Regex filter: copy field to a NUL-terminated buffer for regexec. */
+                char *rbuf = NULL;
+                char rbuf_stack[256];
+                if (flen + 1 <= sizeof(rbuf_stack)) {
+                    rbuf = rbuf_stack;
+                } else {
+                    rbuf = malloc(flen + 1);
+                    if (!rbuf) {
+                        fprintf(stderr,
+                                "[tabix] -F: out of memory for regex match\n");
+                        return 0;
+                    }
+                }
+                memcpy(rbuf, p, flen);
+                rbuf[flen] = '\0';
+                int matched = (regexec(&f->compiled_re, rbuf, 0, NULL, 0) == 0);
+                if (rbuf != rbuf_stack) free(rbuf);
+                switch (f->op) {
+                    case FILT_RE:  pass = matched;  break;
+                    case FILT_NRE: pass = !matched; break;
+                    default:       pass = 0;        break;
+                }
+            } else {
+                /* Exact string filter: compare field bytes directly. */
+                size_t slen = strlen(f->sval);
+                int eq = (flen == slen && memcmp(p, f->sval, flen) == 0);
+                switch (f->op) {
+                    case FILT_EQ: pass = eq;  break;
+                    case FILT_NE: pass = !eq; break;
+                    default:      pass = 0;   break;
+                }
             }
         } else {
             /* Numeric filter. */
@@ -544,7 +598,7 @@ static int tbx_apply_filters(const args_t *args,
             if (errno || nend == field_buf || *nend != '\0') {
                 fprintf(stderr,
                         "[tabix] -F: column %d value '%s' is non-numeric; "
-                        "use a string filter (== or !=) for string columns\n",
+                        "use == / != for exact string match or ~= / !~ for regex\n",
                         f->col, field_buf);
                 return 0;
             }
@@ -2559,9 +2613,10 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "       --cache INT            set cache size to INT megabytes (0 disables) [10]\n");
     fprintf(fp, "       --separate-regions     separate the output by corresponding regions\n");
     fprintf(fp, "   -F, --filter EXPR          filter records by column value; EXPR format:\n");
-    fprintf(fp, "                              <col><op><val>, col is 0-based, op is ==|!=|>=|<=,\n");
-    fprintf(fp, "                              val is numeric or a string (strings: == and != only).\n");
-    fprintf(fp, "                              Repeatable. Examples: -F \"3<=12.5\" -F \"2==chr1\"\n");
+    fprintf(fp, "                              <col><op><val>, col is 0-based.\n");
+    fprintf(fp, "                              Numeric ops: ==  !=  >=  <=\n");
+    fprintf(fp, "                              String ops:  ==  !=  (exact)  ~=  !~  (ERE regex)\n");
+    fprintf(fp, "                              Repeatable. Examples: -F \"3<=12.5\" -F \"0~=^chr\"\n");
     fprintf(fp, "       --verbosity INT        set verbosity [3]\n");
     fprintf(fp, "   -@, --threads INT          number of additional threads to use [0]\n");
     fprintf(fp, "\n");
@@ -2767,8 +2822,11 @@ int main(int argc, char *argv[])
 
         int qret = query_regions(&args, &conf, fname, regs, nregs, sidx_ptr);
         sidx_free(&sidx);
-        for (int i = 0; i < args.nfilters; i++)
+        for (int i = 0; i < args.nfilters; i++) {
+            if (args.filters[i].has_regex)
+                regfree(&args.filters[i].compiled_re);
             free(args.filters[i].sval);
+        }
         free(args.filters);
         return qret;
     }

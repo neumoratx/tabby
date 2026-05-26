@@ -7,9 +7,9 @@
 #   sidx_free()            -- called automatically after every query
 #   tbx_filter_chunks()    -- chunk-level pruning with all four filter ops
 #   sidx_block_filter_cb() -- block-level callback for local-file queries
-#   tbx_apply_filters()    -- per-row exact check; string/numeric/OOB column handling
+#   tbx_apply_filters()    -- per-row exact check; string/regex/numeric/OOB column handling
 #   tbx_parse_filter()     -- -F expression parsing; all error paths including
-#                             string filters (== and != only)
+#                             string filters (==, !=) and regex filters (~=, !~)
 #   coltype_to_sidx()      -- type-code mapping (exercised by dump_blocks)
 #   sidx_write_min/max()   -- value serialisation (exercised by dump_blocks)
 #   col_update()           -- type narrowing; boolean/int32/float/double paths
@@ -82,6 +82,7 @@ cleanup() {
     rm -f sidx_dump.out sidx_types_dump.out sidx_same_dump.out
     rm -f sidx_exp_*.tsv
     rm -f sidx_exp_str_*.tsv
+    rm -f sidx_exp_re_*.tsv
     rm -f "${TMP}".*
 }
 
@@ -165,6 +166,12 @@ awk '$1=="chr1" && $6 >= 49.0'    sidx_data.tsv > sidx_exp_qual_ge49.tsv
 awk '$1=="chr1" && $2==2000'      sidx_data.tsv > sidx_exp_str_name_2000.tsv
 printf 'chr1\t1\t1\tA\t42\t1.00\nchr1\t3\t3\tC\t42\t3.00\n' > sidx_exp_str_same_neqB.tsv
 printf 'chr1\t2\t2\tB\t42\t2.00\n'                            > sidx_exp_str_same_eqB.tsv
+
+# ── Expected files for regex filter tests ──
+# ~= ^row_1[0-9][0-9][0-9]$ on chr1: rows 1000-1999 (NAME matches ^row_1...)
+awk '$1=="chr1" && $2>=1000 && $2<=1999' sidx_data.tsv > sidx_exp_re_row1xxx.tsv
+# !~ on NAME: chr1 rows whose NAME does NOT start with row_1
+awk '$1=="chr1" && $2>=2000 && $2<=4999' sidx_data.tsv > sidx_exp_re_not_row1xxx.tsv
 
 # ── Run dump_blocks once per file and capture TSV output ──
 # (dump_blocks also creates the .sidx binary beside the .gz file)
@@ -371,6 +378,10 @@ check_fail "bad filter: string value with >= (4>=abc)" \
 check_fail "bad filter: string value with <= (4<=word)" \
     "$TABIX" -F "4<=word" sidx_data.tsv.gz chr1:1000-1001
 
+# Invalid regex pattern: regcomp returns error → exit 1.
+check_fail "bad filter: invalid regex pattern (0~=[invalid)" \
+    "$TABIX" -F "0~=[invalid" sidx_data.tsv.gz chr1:1000-1001
+
 # Negative column index: col < 0 check in tbx_parse_filter → error.
 check_fail "bad filter: negative column index (-1>=5)" \
     "$TABIX" -F "-1>=5" sidx_data.tsv.gz chr1:1000-1001
@@ -430,6 +441,50 @@ check_out "string filter does not block block-level pruning by numeric filter" \
 check_out "string FILT_EQ with no match returns empty output (3==Z)" \
     sidx_exp_empty.tsv \
     "$TABIX" -F "3==Z" sidx_same.tsv.gz chr1:1-3
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 7: Regex filter support (~= and !~)
+#   Exercises: tbx_parse_filter regex path (regcomp), tbx_apply_filters regex
+#              branch (regexec), block-level functions skipping regex filters.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 7: regex -F filters (~= and !~) ---"
+
+# Rebuild the sidx for sidx_data (may have been removed or corrupted in earlier sections).
+$TABIX --dump-blocks sidx_data.tsv.gz >/dev/null 2>/dev/null \
+    || die "dump_blocks sidx_data for Section 7"
+
+# ~= anchored match: NAME (col 3) matches ^row_1[0-9][0-9][0-9]$ → rows 1000-1999.
+check_out "regex FILT_RE anchored match selects rows 1000-1999 (3~=^row_1...)" \
+    sidx_exp_re_row1xxx.tsv \
+    "$TABIX" -F "3~=^row_1[0-9][0-9][0-9]\$" sidx_data.tsv.gz chr1:1000-4999
+
+# !~ inverted match: NAME does NOT match ^row_1 → rows 2000-4999.
+check_out "regex FILT_NRE inverted match selects rows 2000-4999 (3!~^row_1)" \
+    sidx_exp_re_not_row1xxx.tsv \
+    "$TABIX" -F "3!~^row_1" sidx_data.tsv.gz chr1:1000-4999
+
+# ~= with alternation (ERE): CHROM matches chr1|chr2 — passes every row in the query.
+check_out "regex FILT_RE ERE alternation passes all rows (0~=chr1|chr2)" \
+    sidx_exp_chr1_all.tsv \
+    "$TABIX" -F "0~=chr1|chr2" sidx_data.tsv.gz chr1:1000-4999
+
+# ~= with pattern that matches nothing → empty output.
+check_out "regex FILT_RE no-match pattern returns empty (3~=^nomatch)" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "3~=^nomatch" sidx_data.tsv.gz chr1:1000-4999
+
+# !~ with pattern that matches every row → empty output (every row excluded).
+check_out "regex FILT_NRE universal match returns empty (3!~^row_)" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "3!~^row_" sidx_data.tsv.gz chr1:1000-4999
+
+# Regex filter must not interfere with numeric block-level pruning.
+# 4!=42 drops the sidx_same chunk at block level; 3~=B is skipped at block level.
+check_out "regex filter does not block block-level pruning by numeric filter" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "4!=42" -F "3~=B" sidx_same.tsv.gz chr1:1-3
 
 echo ""
 
