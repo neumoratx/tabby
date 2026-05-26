@@ -489,6 +489,45 @@ check_out "regex filter does not block block-level pruning by numeric filter" \
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SECTION 8: Whole-file filter scan (no region argument)
+#   When -F is given without any region, tabix enters the query path with the
+#   "." wildcard, scanning the entire file and applying all filters.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 8: whole-file -F scan without region argument ---"
+
+# Rebuild the sidx for sidx_data (may have been removed/corrupted earlier).
+$TABIX --dump-blocks sidx_data.tsv.gz >/dev/null 2>/dev/null \
+    || die "dump_blocks sidx_data for Section 8"
+
+# Pre-build expected files that span both chromosomes.
+awk '$5 == 2500' sidx_data.tsv > sidx_exp_whole_score_eq2500.tsv   # one chr1 row
+awk '$5 >= 14990' sidx_data.tsv > sidx_exp_whole_score_ge14990.tsv # chr2 rows 4990-4999
+
+# Numeric filter, no region: FILT_EQ on SCORE across the whole file.
+# Block-level pruning (via sidx) should still fire for chr1 blocks.
+check_out "whole-file FILT_EQ numeric filter (no region, score==2500)" \
+    sidx_exp_whole_score_eq2500.tsv \
+    "$TABIX" -F "4==2500" sidx_data.tsv.gz
+
+# Numeric filter, no region: FILT_GE prunes chr1 blocks (max 4999 < 14990).
+check_out "whole-file FILT_GE with block pruning (no region, score>=14990)" \
+    sidx_exp_whole_score_ge14990.tsv \
+    "$TABIX" -F "4>=14990" sidx_data.tsv.gz
+
+# String filter, no region: exact match on CHROM returns only chr2 rows.
+check_out "whole-file string FILT_EQ on CHROM (no region, 0==chr2)" \
+    sidx_exp_whole_score_ge14990.tsv \
+    "$TABIX" -F "0==chr2" -F "4>=14990" sidx_data.tsv.gz
+
+# Regex filter, no region: NAME matches ^row_4999 — one row on each chromosome.
+awk '$4=="row_4999"' sidx_data.tsv > sidx_exp_whole_re_row4999.tsv
+check_out "whole-file regex filter (no region, 3~=^row_4999\$)" \
+    sidx_exp_whole_re_row4999.tsv \
+    "$TABIX" -F "3~=^row_4999\$" sidx_data.tsv.gz
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Expected   passes:   $_np"

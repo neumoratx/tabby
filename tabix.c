@@ -2796,7 +2796,7 @@ int main(int argc, char *argv[])
             if ( !min_shift ) min_shift = 14;
         }
     }
-    if ( argc > optind+1 || args.header_only || args.regions_fname || args.targets_fname )
+    if ( argc > optind+1 || args.header_only || args.regions_fname || args.targets_fname || args.nfilters > 0 )
     {
         int nregs = 0;
         char **regs = NULL;
