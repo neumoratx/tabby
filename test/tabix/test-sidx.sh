@@ -638,14 +638,17 @@ check_out "FILT_AND failure overrides passing FILT_OR" \
     "$TABIX" -F "4>=10000" -O "3==row_1000" sidx_data.tsv.gz chr1:1000-4999
 
 # OR filters must not participate in block-level pruning.
-# sidx_same has all SCORE=42.  A numeric -F "4!=42" drops the chunk at block
-# level (blk_min==blk_max==val).  If -O "4!=42" were mistakenly used for
-# block pruning, the chunk would also be dropped, producing empty output.
-# With -O only, the chunk must be kept and rows evaluated at row level.
-# The OR filter "4!=42" fails for all three rows → empty output from row eval.
-check_out "FILT_OR does not prune blocks (4!=42 via -O returns empty at row level)" \
-    sidx_exp_empty.tsv \
-    "$TABIX" -O "4!=42" sidx_same.tsv.gz chr1:1-3
+#
+# sidx_same has all SCORE=42.  -F "4!=42" drops the entire chunk at block level
+# (blk_min==blk_max==val → impossible).  -O "4!=42" must NOT trigger the same
+# pruning — doing so would drop the chunk before any row is examined, causing
+# a second OR branch ("3==B") to never fire even though row B would pass it.
+#
+# Correct behaviour: chunk is kept → row B satisfies "3==B" → one row returned.
+# Bug behaviour  : chunk pruned by "4!=42" OR branch → empty output.
+check_out "FILT_OR: impossible OR branch does not prune chunk; passing branch fires" \
+    sidx_exp_str_same_eqB.tsv \
+    "$TABIX" -O "4!=42" -O "3==B" sidx_same.tsv.gz chr1:1-3
 
 # Whole-file OR scan (no region), seqonly file: GeneA or GeneC — two rows.
 awk '$1=="GeneA" || $1=="GeneC"' sidx_seqonly.tsv > sidx_exp_or_seqonly_AC.tsv
