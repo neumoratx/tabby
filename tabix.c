@@ -80,14 +80,16 @@ typedef struct {
     char    *sval;        /* string/regex value (non-numeric filters; NULL if numeric) */
     regex_t  compiled_re; /* compiled regex (FILT_RE / FILT_NRE only)          */
     int      has_regex;   /* 1 if compiled_re is valid and must be freed        */
+    int      is_or;       /* 1 if from -O (OR group); 0 if from -F (AND group)  */
 } filter_expr_t;
 
 typedef struct
 {
     char *regions_fname, *targets_fname;
     int print_header, header_only, cache_megs, download_index, separate_regs, threads;
-    filter_expr_t *filters;   /* array of parsed -F expressions */
-    int            nfilters;  /* number of entries in filters[] */
+    filter_expr_t *filters;   /* array of parsed -F / -O expressions */
+    int            nfilters;  /* total entries in filters[]           */
+    int            n_or_filters; /* number of -O (OR-group) entries   */
 }
 args_t;
 
@@ -393,7 +395,7 @@ static char **parse_regions(char *regions_fname, char **argv, int argc, int *nre
  *
  * Returns 0 on success, -1 on parse error (message printed to stderr).
  */
-static int tbx_parse_filter(args_t *args, const char *expr)
+static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
 {
     if (!expr || !*expr) {
         fprintf(stderr, "[tabix] -F: empty filter expression\n");
@@ -464,6 +466,7 @@ static int tbx_parse_filter(args_t *args, const char *expr)
     f->val       = is_string ? 0.0 : val;
     f->sval      = NULL;
     f->has_regex = 0;
+    f->is_or     = is_or;
 
     if (is_string) {
         f->sval = strdup(end);
@@ -486,6 +489,7 @@ static int tbx_parse_filter(args_t *args, const char *expr)
         }
     }
     args->nfilters++;
+    if (is_or) args->n_or_filters++;
     return 0;
 }
 
@@ -514,6 +518,11 @@ static int tbx_apply_filters(const args_t *args,
                               size_t        len)
 {
     if (!args->nfilters) return 1;   /* no filters → accept everything */
+
+    /* Two-pass evaluation:
+     *   Pass 1: AND filters (-F) — all must pass; fail fast on first failure.
+     *   Pass 2: OR  filters (-O) — at least one must pass (skipped when none). */
+    int or_passed = 0;
 
     for (int fi = 0; fi < args->nfilters; fi++) {
         const filter_expr_t *f = &args->filters[fi];
@@ -611,10 +620,17 @@ static int tbx_apply_filters(const args_t *args,
                 default:      pass = 1; break;
             }
         }
-        if (!pass) return 0;
+        if (f->is_or) {
+            if (pass) or_passed = 1;   /* at least one OR filter satisfied */
+        } else {
+            if (!pass) return 0;       /* AND filter failed → reject immediately */
+        }
     }
 
-    return 1;   /* all filters passed */
+    /* If any OR filters were registered, at least one must have passed. */
+    if (args->n_or_filters > 0 && !or_passed) return 0;
+
+    return 1;   /* all AND filters passed; OR condition satisfied */
 }
 
 
@@ -722,8 +738,8 @@ static void tbx_filter_chunks(const args_t *args,
         for (int fi = 0; fi < args->nfilters && !chunk_dropped; fi++) {
             const filter_expr_t *f = &args->filters[fi];
 
-            /* String filters have no numeric min/max in the sidx — skip. */
-            if (f->sval) continue;
+            /* OR filters and string/regex filters cannot safely prune blocks — skip. */
+            if (f->is_or || f->sval) continue;
 
             /* Only block-filter numeric columns that are within ncols. */
             if ((uint32_t)f->col >= sidx->ncols) continue;
@@ -858,7 +874,7 @@ static uint64_t sidx_block_filter_cb(uint64_t block_address, void *data)
     for (int fi = 0; fi < st->nfilters; fi++) {
         const filter_expr_t *f = &st->filters[fi];
 
-        if (f->sval) continue;  /* no block-level filtering for string filters */
+        if (f->is_or || f->sval) continue;  /* OR / string / regex: skip block pruning */
         if ((uint32_t)f->col >= sidx->ncols) continue;
         uint8_t tc_min = sidx->col_min_tc[f->col];
         uint8_t tc_max = sidx->col_max_tc[f->col];
@@ -983,7 +999,7 @@ static int bgzf_decomp_skip_cb(int64_t block_address, void *data)
     for (int fi = 0; fi < st->nfilters; fi++) {
         const filter_expr_t *f = &st->filters[fi];
 
-        if (f->sval) continue;  /* no block-level filtering for string filters */
+        if (f->is_or || f->sval) continue;  /* OR / string / regex: skip block pruning */
         if ((uint32_t)f->col >= sidx->ncols) continue;
         uint8_t tc_min = sidx->col_min_tc[f->col];
         uint8_t tc_max = sidx->col_max_tc[f->col];
@@ -2612,11 +2628,13 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "   -D                         do not download the index file\n");
     fprintf(fp, "       --cache INT            set cache size to INT megabytes (0 disables) [10]\n");
     fprintf(fp, "       --separate-regions     separate the output by corresponding regions\n");
-    fprintf(fp, "   -F, --filter EXPR          filter records by column value; EXPR format:\n");
+    fprintf(fp, "   -F, --filter EXPR          filter records by column value (AND); EXPR format:\n");
     fprintf(fp, "                              <col><op><val>, col is 0-based.\n");
     fprintf(fp, "                              Numeric ops: ==  !=  >=  <=\n");
     fprintf(fp, "                              String ops:  ==  !=  (exact)  ~=  !~  (ERE regex)\n");
     fprintf(fp, "                              Repeatable. Examples: -F \"3<=12.5\" -F \"0~=^chr\"\n");
+    fprintf(fp, "   -O, --or-filter EXPR       like -F but expressions are OR'd; the AND group\n");
+    fprintf(fp, "                              (-F) and OR group (-O) are combined with AND.\n");
     fprintf(fp, "       --verbosity INT        set verbosity [3]\n");
     fprintf(fp, "   -@, --threads INT          number of additional threads to use [0]\n");
     fprintf(fp, "\n");
@@ -2665,11 +2683,12 @@ int main(int argc, char *argv[])
         {"threads", required_argument, NULL, '@'},
         {"dump-blocks", no_argument, NULL, 6},
         {"filter", required_argument, NULL, 'F'},
+        {"or-filter", required_argument, NULL, 'O'},
         {NULL, 0, NULL, 0}
     };
 
     char *tmp;
-    while ((c = getopt_long(argc, argv, "hH?0b:c:e:fm:p:s:S:lr:CR:T:D@:F:", loptions,NULL)) >= 0)
+    while ((c = getopt_long(argc, argv, "hH?0b:c:e:fm:p:s:S:lr:CR:T:D@:F:O:", loptions,NULL)) >= 0)
     {
         switch (c)
         {
@@ -2756,7 +2775,11 @@ int main(int argc, char *argv[])
                 args.threads = atoi(optarg);
                 break;
             case 'F':
-                if (tbx_parse_filter(&args, optarg) != 0)
+                if (tbx_parse_filter(&args, optarg, 0) != 0)
+                    return EXIT_FAILURE;
+                break;
+            case 'O':
+                if (tbx_parse_filter(&args, optarg, 1) != 0)
                     return EXIT_FAILURE;
                 break;
             default: return usage(stderr, EXIT_FAILURE);
@@ -2796,7 +2819,7 @@ int main(int argc, char *argv[])
             if ( !min_shift ) min_shift = 14;
         }
     }
-    if ( argc > optind+1 || args.header_only || args.regions_fname || args.targets_fname || args.nfilters > 0 )
+    if ( argc > optind+1 || args.header_only || args.regions_fname || args.targets_fname || args.nfilters > 0 || args.n_or_filters > 0 )
     {
         int nregs = 0;
         char **regs = NULL;

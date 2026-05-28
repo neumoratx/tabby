@@ -595,6 +595,67 @@ check_out "seqonly: whole-file filter with no match returns empty (4==miRNA)" \
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SECTION 10: -O OR-filter support
+#
+#   -O filters are OR'd among themselves; the OR group and the -F AND group
+#   are combined with AND:  row passes iff (all -F pass) AND (any -O passes).
+#   OR filters must not participate in block-level chunk pruning.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 10: -O OR-filter expressions ---"
+
+# Rebuild sidx for sidx_data (may have been invalidated by earlier sections).
+$TABIX --dump-blocks sidx_data.tsv.gz >/dev/null 2>/dev/null \
+    || die "dump_blocks sidx_data for Section 10"
+
+# OR of two exact matches: rows with SCORE==2500 OR SCORE==3000.
+awk '$5==2500 || $5==3000' sidx_data.tsv > sidx_exp_or_2500_3000.tsv
+check_out "FILT_OR: two exact scores OR'd (4==2500 OR 4==3000)" \
+    sidx_exp_or_2500_3000.tsv \
+    "$TABIX" -O "4==2500" -O "4==3000" sidx_data.tsv.gz chr1:1000-4999
+
+# OR combined with AND: chr2 only (AND) AND (SCORE==12500 OR SCORE==13000).
+awk '$1=="chr2" && ($5==12500 || $5==13000)' sidx_data.tsv > sidx_exp_or_and.tsv
+check_out "FILT_OR + FILT_AND: chr2 rows with score 12500 or 13000" \
+    sidx_exp_or_and.tsv \
+    "$TABIX" -F "0==chr2" -O "4==12500" -O "4==13000" sidx_data.tsv.gz chr2:1000-4999
+
+# OR with regex: CHROM matches chr1 OR NAME matches row_2000.
+# Within the chr1 query region, chr1 matches all rows; so all chr1 rows pass.
+check_out "FILT_OR: regex OR exact string passes all chr1 rows" \
+    sidx_exp_chr1_all.tsv \
+    "$TABIX" -O "0~=chr1" -O "3==row_2000" sidx_data.tsv.gz chr1:1000-4999
+
+# OR where neither branch matches → empty output.
+check_out "FILT_OR: no match in either branch → empty output" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -O "4==99999" -O "4==88888" sidx_data.tsv.gz chr1:1000-4999
+
+# AND filter that fails overrides a passing OR filter → empty output.
+# F: SCORE>=10000 (impossible on chr1, max=4999); O: NAME==row_1000 (passes).
+# The AND group must pass first; since SCORE>=10000 fails, the row is rejected.
+check_out "FILT_AND failure overrides passing FILT_OR" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "4>=10000" -O "3==row_1000" sidx_data.tsv.gz chr1:1000-4999
+
+# OR filters must not participate in block-level pruning.
+# sidx_same has all SCORE=42.  A numeric -F "4!=42" drops the chunk at block
+# level (blk_min==blk_max==val).  If -O "4!=42" were mistakenly used for
+# block pruning, the chunk would also be dropped, producing empty output.
+# With -O only, the chunk must be kept and rows evaluated at row level.
+# The OR filter "4!=42" fails for all three rows → empty output from row eval.
+check_out "FILT_OR does not prune blocks (4!=42 via -O returns empty at row level)" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -O "4!=42" sidx_same.tsv.gz chr1:1-3
+
+# Whole-file OR scan (no region), seqonly file: GeneA or GeneC — two rows.
+awk '$1=="GeneA" || $1=="GeneC"' sidx_seqonly.tsv > sidx_exp_or_seqonly_AC.tsv
+check_out "FILT_OR whole-file seqonly: two gene names OR'd (GeneA or GeneC)" \
+    sidx_exp_or_seqonly_AC.tsv \
+    "$TABIX" -O "0==GeneA" -O "0==GeneC" sidx_seqonly.tsv.gz
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Expected   passes:   $_np"
