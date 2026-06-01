@@ -26,6 +26,10 @@ Tabby also adds support for one or more additional filters on the columns in the
 
 Both AND (`-F`) and OR (`-O`) are supported when specifying a specific filter.
 
+Columns can be specified by either their *exact* name (case sensitive) or by column index (starting at 0 from the left).
+
+Column names if used in the filters *must not* contain any of the 2-character operators: `==`, `!=`, `>=`, `<=`, `~=`, nor `!~`.
+
 ## Secondary Index Across All Numeric Columns
 An additional important, but more "under-the-hood" feature that Tabby has beyond Tabix, is that while the above filtering will work on a normal bgzipped file with normal tabix index, Tabby now supports the generation of a secondary index (`sidx`) which stores additional information across all the numeric columns (not applicable to string columns).  This secondary index specifically tracks the min/max values of each numeric column across each compressed block in the block-gzip.  
 
