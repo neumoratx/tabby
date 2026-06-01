@@ -79,6 +79,7 @@ cleanup() {
     rm -f sidx_types.tsv sidx_types.tsv.gz sidx_types.tsv.gz.tbi sidx_types.tsv.gz.sidx
     rm -f sidx_same.tsv sidx_same.tsv.gz sidx_same.tsv.gz.tbi sidx_same.tsv.gz.sidx
     rm -f sidx_seqonly.tsv sidx_seqonly.tsv.gz sidx_seqonly.tsv.gz.tbi
+    rm -f sidx_named.tsv sidx_named.tsv.gz sidx_named.tsv.gz.tbi sidx_named.tsv.gz.sidx
     rm -f sidx_notbi.tsv.gz
     rm -f sidx_dump.out sidx_types_dump.out sidx_same_dump.out
     rm -f sidx_exp_*.tsv
@@ -192,6 +193,24 @@ printf 'GeneE\tchr3\t9000\t9500\tprotein_coding\n' >> sidx_seqonly.tsv
 
 $BGZIP -c sidx_seqonly.tsv > sidx_seqonly.tsv.gz || die "bgzip sidx_seqonly"
 $TABIX -f -p seqonly sidx_seqonly.tsv.gz          || die "tabix index sidx_seqonly"
+
+# ── sidx_named.tsv: column-name filter test file ──
+#
+# Has a '#' header line so column names can be used in -F/-O expressions.
+# 6 columns (0-based):
+#   0: CHROM   string
+#   1: POS     int16
+#   2: END     int16 (= POS, point records)
+#   3: LABEL   string (A / B / C)
+#   4: SCORE   int16  (42 / 100 / 42)
+#   5: TYPE    string (protein_coding / lncRNA / rRNA)
+printf '#CHROM\tPOS\tEND\tLABEL\tSCORE\tTYPE\n'     >  sidx_named.tsv
+printf 'chr1\t1\t1\tA\t42\tprotein_coding\n'         >> sidx_named.tsv
+printf 'chr1\t2\t2\tB\t100\tlncRNA\n'                >> sidx_named.tsv
+printf 'chr1\t3\t3\tC\t42\trRNA\n'                   >> sidx_named.tsv
+
+$BGZIP -c sidx_named.tsv > sidx_named.tsv.gz    || die "bgzip sidx_named"
+$TABIX -f -s 1 -b 2 -e 3 -c '#' sidx_named.tsv.gz || die "tabix index sidx_named"
 
 # ── Run dump_blocks once per file and capture TSV output ──
 # (dump_blocks also creates the .sidx binary beside the .gz file)
@@ -655,6 +674,58 @@ awk '$1=="GeneA" || $1=="GeneC"' sidx_seqonly.tsv > sidx_exp_or_seqonly_AC.tsv
 check_out "FILT_OR whole-file seqonly: two gene names OR'd (GeneA or GeneC)" \
     sidx_exp_or_seqonly_AC.tsv \
     "$TABIX" -O "0==GeneA" -O "0==GeneC" sidx_seqonly.tsv.gz
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 11: Column-name filter support
+#
+#   -F / -O expressions can use a column name from the file's first header
+#   line instead of a 0-based integer index.  The header line is the first
+#   line of the BGZF file; a leading '#' is stripped before splitting by tab.
+#   Names are resolved to 0-based column indexes at query time.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 11: column-name filters (-F with header line) ---"
+
+# Expected output files (data rows only, no header).
+grep -v '^#' sidx_named.tsv | awk '$4=="B"'        > sidx_exp_named_B.tsv
+grep -v '^#' sidx_named.tsv | awk '$5>=50'          > sidx_exp_named_score50.tsv
+grep -v '^#' sidx_named.tsv | grep 'RNA'            > sidx_exp_named_rna.tsv
+grep -v '^#' sidx_named.tsv | awk '$6=="rRNA"'      > sidx_exp_named_rrna.tsv
+
+# String filter by column name: LABEL==B → row B only.
+check_out "column-name string FILT_EQ: LABEL==B" \
+    sidx_exp_named_B.tsv \
+    "$TABIX" -F "LABEL==B" sidx_named.tsv.gz chr1:1-3
+
+# Numeric filter by column name: SCORE>=50 → row B (score=100).
+check_out "column-name numeric FILT_GE: SCORE>=50" \
+    sidx_exp_named_score50.tsv \
+    "$TABIX" -F "SCORE>=50" sidx_named.tsv.gz chr1:1-3
+
+# Regex filter by column name: TYPE~=RNA → rows B (lncRNA) and C (rRNA).
+check_out "column-name regex FILT_RE: TYPE~=RNA" \
+    sidx_exp_named_rna.tsv \
+    "$TABIX" -F "TYPE~=RNA" sidx_named.tsv.gz chr1:1-3
+
+# Numeric column index still works on a named-header file (backward compat).
+check_out "column-index still works on named-header file (3==B)" \
+    sidx_exp_named_B.tsv \
+    "$TABIX" -F "3==B" sidx_named.tsv.gz chr1:1-3
+
+# No match → empty output (not an error).
+check_out "column-name filter no match returns empty (LABEL==Z)" \
+    sidx_exp_empty.tsv \
+    "$TABIX" -F "LABEL==Z" sidx_named.tsv.gz chr1:1-3
+
+# Whole-file scan with column-name filter (no region argument).
+check_out "column-name whole-file scan (TYPE==rRNA)" \
+    sidx_exp_named_rrna.tsv \
+    "$TABIX" -F "TYPE==rRNA" sidx_named.tsv.gz
+
+# Unknown column name → non-zero exit.
+check_fail "unknown column name exits with error (MISSINGCOL==X)" \
+    "$TABIX" -F "MISSINGCOL==X" sidx_named.tsv.gz chr1:1-3
 
 echo ""
 

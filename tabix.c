@@ -74,7 +74,8 @@ typedef enum {
 } FilterOp;
 
 typedef struct {
-    int      col;         /* 0-based column index                              */
+    int      col;         /* 0-based column index; -1 if col_name not yet resolved */
+    char    *col_name;    /* non-NULL if column was specified by name (resolved at query time) */
     FilterOp op;          /* comparison operator                                */
     double   val;         /* numeric threshold (numeric filters only)           */
     char    *sval;        /* string/regex value (non-numeric filters; NULL if numeric) */
@@ -385,13 +386,15 @@ static char **parse_regions(char *regions_fname, char **argv, int argc, int *nre
 }
 
 /*
- * tbx_parse_filter() -- parse a single -F argument of the form
- *   <col-index><op><value>
+ * tbx_parse_filter() -- parse a single -F/-O argument of the form
+ *   <col><op><value>
  * into a filter_expr_t and append it to args->filters[].
  *
- * col-index  : non-negative integer (0-based column)
- * op         : one of  ==  !=  >=  <=
- * value      : numeric literal (integer or floating-point)
+ * col    : non-negative integer (0-based column index) OR a column name from
+ *          the file's header line (resolved to an index at query time).
+ *          Column names must not contain any two-character operator substring.
+ * op     : one of  ==  !=  >=  <=  ~=  !~
+ * value  : numeric literal, exact string, or ERE regex pattern
  *
  * Returns 0 on success, -1 on parse error (message printed to stderr).
  */
@@ -402,10 +405,44 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
         return -1;
     }
 
-    /* Parse the column index (all leading digits). */
+    /* Parse the column spec: a non-negative integer OR a column name.
+     * Column names are resolved to 0-based indexes at query time; they must
+     * not contain any two-character operator string (==, !=, >=, <=, ~=, !~). */
     char *end;
     long col = strtol(expr, &end, 10);
-    if (end == expr || col < 0) {
+    char *col_name = NULL;
+
+    if (end == expr) {
+        /* Not a numeric index — find the first two-char operator to locate
+         * the end of the column name. */
+        static const char * const two_char_ops[] =
+            { "==", "!=", ">=", "<=", "~=", "!~", NULL };
+        const char *op_pos = NULL;
+        for (int i = 0; two_char_ops[i]; i++) {
+            const char *p = strstr(expr, two_char_ops[i]);
+            if (p && (!op_pos || p < op_pos))
+                op_pos = p;
+        }
+        if (!op_pos) {
+            fprintf(stderr, "[tabix] -F: no operator found in '%s' "
+                            "(expected ==, !=, >=, <=, ~=, or !~)\n", expr);
+            return -1;
+        }
+        size_t name_len = (size_t)(op_pos - expr);
+        if (name_len == 0) {
+            fprintf(stderr, "[tabix] -F: empty column spec in '%s'\n", expr);
+            return -1;
+        }
+        col_name = malloc(name_len + 1);
+        if (!col_name) {
+            fprintf(stderr, "[tabix] -F: out of memory\n");
+            return -1;
+        }
+        memcpy(col_name, expr, name_len);
+        col_name[name_len] = '\0';
+        col = -1;
+        end = (char *)op_pos;
+    } else if (col < 0) {
         fprintf(stderr, "[tabix] -F: expected non-negative column index at "
                         "start of '%s'\n", expr);
         return -1;
@@ -420,6 +457,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
     else if (end[0] == '~' && end[1] == '=') { op = FILT_RE;  end += 2; }
     else if (end[0] == '!' && end[1] == '~') { op = FILT_NRE; end += 2; }
     else {
+        free(col_name);
         fprintf(stderr, "[tabix] -F: unrecognised operator in '%s' "
                         "(expected ==, !=, >=, <=, ~=, or !~)\n", expr);
         return -1;
@@ -428,6 +466,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
     /* Parse the value: regex operators always take a string; others try numeric
      * first and fall back to string. */
     if (!*end) {
+        free(col_name);
         fprintf(stderr, "[tabix] -F: missing value after operator in '%s'\n",
                 expr);
         return -1;
@@ -445,6 +484,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
         is_string = (errno != 0 || vend == end || *vend != '\0');
 
         if (is_string && op != FILT_EQ && op != FILT_NE) {
+            free(col_name);
             fprintf(stderr, "[tabix] -F: string filters only support ==, !=, ~=, and !~; "
                             "got '%s'\n", expr);
             return -1;
@@ -456,12 +496,14 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
                                  (size_t)(args->nfilters + 1)
                                  * sizeof(filter_expr_t));
     if (!tmp) {
+        free(col_name);
         fprintf(stderr, "[tabix] -F: out of memory\n");
         return -1;
     }
     args->filters = tmp;
     filter_expr_t *f = &args->filters[args->nfilters];
     f->col       = (int)col;
+    f->col_name  = col_name;
     f->op        = op;
     f->val       = is_string ? 0.0 : val;
     f->sval      = NULL;
@@ -471,6 +513,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
     if (is_string) {
         f->sval = strdup(end);
         if (!f->sval) {
+            free(f->col_name); f->col_name = NULL;
             fprintf(stderr, "[tabix] -F: out of memory\n");
             return -1;
         }
@@ -483,6 +526,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
                         end, errbuf);
                 free(f->sval);
                 f->sval = NULL;
+                free(f->col_name); f->col_name = NULL;
                 return -1;
             }
             f->has_regex = 1;
@@ -526,6 +570,10 @@ static int tbx_apply_filters(const args_t *args,
 
     for (int fi = 0; fi < args->nfilters; fi++) {
         const filter_expr_t *f = &args->filters[fi];
+
+        /* Safety net: unresolved column name (resolve_filter_col_names should
+         * have been called before we reach here; skip conservatively if not). */
+        if (f->col < 0) continue;
 
         /* Chunk-level block pruning is handled upstream by tbx_filter_chunks().
          * Here we only perform the exact per-field check on the decoded line. */
@@ -1044,6 +1092,80 @@ static int bgzf_decomp_skip_cb(int64_t block_address, void *data)
     return 0;   /* all filters pass — decompress normally */
 }
 
+/*
+ * resolve_filter_col_names() -- map any column-name filter specs to their
+ * 0-based column indexes by reading the first line of the file as a header.
+ *
+ * The header line is expected to be the first line of the BGZF file.
+ * A leading meta_char (e.g. '#') is stripped before splitting by tab.
+ * This handles both comment-style headers (#COL1\tCOL2\t...) and plain
+ * headers used with -S 1 (line_skip=1).
+ *
+ * Returns 0 on success (all names resolved or no named filters present),
+ * -1 on error (message printed to stderr).
+ */
+static int resolve_filter_col_names(args_t *args, const char *fname,
+                                    const tbx_conf_t *conf)
+{
+    int has_names = 0;
+    for (int i = 0; i < args->nfilters; i++)
+        if (args->filters[i].col_name) { has_names = 1; break; }
+    if (!has_names) return 0;
+
+    BGZF *fp = bgzf_open(fname, "r");
+    if (!fp) {
+        fprintf(stderr, "[tabix] cannot open '%s' to resolve column names: %s\n",
+                fname, strerror(errno));
+        return -1;
+    }
+
+    kstring_t line = {0, 0, NULL};
+    int ret = bgzf_getline(fp, '\n', &line);
+    bgzf_close(fp);
+
+    if (ret < 0 || !line.l) {
+        fprintf(stderr, "[tabix] cannot read header line from '%s'\n", fname);
+        free(line.s);
+        return -1;
+    }
+
+    /* Strip a leading meta_char (e.g. '#') if present. */
+    char *hdr = line.s;
+    if (conf->meta_char && (unsigned char)*hdr == (unsigned char)conf->meta_char)
+        hdr++;
+
+    int rc = 0;
+    for (int fi = 0; fi < args->nfilters && rc == 0; fi++) {
+        filter_expr_t *f = &args->filters[fi];
+        if (!f->col_name) continue;
+
+        char *p = hdr;
+        int ci = 0, found = 0;
+        while (*p && !found) {
+            char *tab = strchr(p, '\t');
+            size_t flen = tab ? (size_t)(tab - p) : strlen(p);
+            if (flen == strlen(f->col_name) &&
+                    memcmp(p, f->col_name, flen) == 0) {
+                f->col = ci;
+                found = 1;
+            }
+            if (!found) {
+                if (!tab) break;
+                p = tab + 1;
+                ci++;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "[tabix] -F: column name '%s' not found in "
+                            "header of '%s'\n", f->col_name, fname);
+            rc = -1;
+        }
+    }
+
+    free(line.s);
+    return rc;
+}
+
 static int query_regions(args_t *args, tbx_conf_t *conf, char *fname, char **regs, int nregs,const sidx_t *sidx)
 {
     int i;
@@ -1163,6 +1285,18 @@ static int query_regions(args_t *args, tbx_conf_t *conf, char *fname, char **reg
             error_errno("Could not load .tbi/.csi index of %s", fname);
         }
         kstring_t str = {0,0,0};
+
+        /* Resolve any column names in -F/-O expressions to 0-based indexes
+         * using the header line from the file. */
+        if (resolve_filter_col_names(args, fname, &tbx->conf) != 0) {
+            free(str.s);
+            tbx_destroy(tbx);
+            if (reg_idx) regidx_destroy(reg_idx);
+            hts_close(fp);
+            RELEASE_TPOOL(tpool.pool);
+            return 1;
+        }
+
         if ( args->print_header )
         {
             int ret;
@@ -2629,10 +2763,12 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "       --cache INT            set cache size to INT megabytes (0 disables) [10]\n");
     fprintf(fp, "       --separate-regions     separate the output by corresponding regions\n");
     fprintf(fp, "   -F, --filter EXPR          filter records by column value (AND); EXPR format:\n");
-    fprintf(fp, "                              <col><op><val>, col is 0-based.\n");
+    fprintf(fp, "                              <col><op><val>, col is 0-based index or column name.\n");
+    fprintf(fp, "                              Column names are resolved from the file's first\n");
+    fprintf(fp, "                              header line (leading # stripped if present).\n");
     fprintf(fp, "                              Numeric ops: ==  !=  >=  <=\n");
     fprintf(fp, "                              String ops:  ==  !=  (exact)  ~=  !~  (ERE regex)\n");
-    fprintf(fp, "                              Repeatable. Examples: -F \"3<=12.5\" -F \"0~=^chr\"\n");
+    fprintf(fp, "                              Repeatable. Examples: -F \"3<=12.5\" -F \"SCORE>=50\"\n");
     fprintf(fp, "   -O, --or-filter EXPR       like -F but expressions are OR'd; the AND group\n");
     fprintf(fp, "                              (-F) and OR group (-O) are combined with AND.\n");
     fprintf(fp, "       --verbosity INT        set verbosity [3]\n");
@@ -2849,6 +2985,7 @@ int main(int argc, char *argv[])
             if (args.filters[i].has_regex)
                 regfree(&args.filters[i].compiled_re);
             free(args.filters[i].sval);
+            free(args.filters[i].col_name);
         }
         free(args.filters);
         return qret;
