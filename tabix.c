@@ -2774,18 +2774,19 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "       --verbosity INT        set verbosity [3]\n");
     fprintf(fp, "   -@, --threads INT          number of additional threads to use [0]\n");
     fprintf(fp, "\n");
-    fprintf(fp, "The 'seqonly' preset (-p seqonly) indexes tab-delimited files by\n");
+    fprintf(fp, "The default preset is 'seqonly': indexes tab-delimited files by\n");
     fprintf(fp, "sequence/chromosome name only. No start/end coordinate columns are\n");
     fprintf(fp, "needed. Use -s to specify the chromosome column (default: 1).\n");
     fprintf(fp, "Query with a bare name: tabix FILE chr1\n");
+    fprintf(fp, "Use -p gff/bed/sam/vcf to index coordinate-based files.\n");
     fprintf(fp, "\n");
     return status;
 }
 
 int main(int argc, char *argv[])
 {
-    int c, detect = 1, min_shift = 0, is_force = 0, list_chroms = 0, do_csi = 0, dump_blocks_flag = 0;
-    tbx_conf_t conf = tbx_conf_gff;
+    int c, detect = 0, min_shift = 0, is_force = 0, list_chroms = 0, do_csi = 0, dump_blocks_flag = 0;
+    tbx_conf_t conf = tbx_conf_seqonly;
     char *reheader = NULL;
     args_t args;
     memset(&args,0,sizeof(args_t));
@@ -2839,11 +2840,13 @@ int main(int argc, char *argv[])
             case 'b':
                 conf.bc = strtol(optarg,&tmp,10);
                 if ( *tmp ) error("Could not parse argument: -b %s\n", optarg);
+                conf.preset &= ~TBX_SEQONLY;   /* explicit coord column → not seqonly */
                 detect = 0;
                 break;
             case 'e':
                 conf.ec = strtol(optarg,&tmp,10);
                 if ( *tmp ) error("Could not parse argument: -e %s\n", optarg);
+                conf.preset &= ~TBX_SEQONLY;   /* explicit coord column → not seqonly */
                 detect = 0;
                 break;
             case 'c': conf.meta_char = *optarg; detect = 0; break;
