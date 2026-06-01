@@ -1,14 +1,31 @@
 # Tabby
 
-Tabby is a project heavily based on htslib's `Tabix/bgzip` tools.
+Tabby is a project heavily based on htslib's `Tabix/bgzip` tools for the purpose of more general but still efficient querying of tabular data on the command line.
 
-The idea is to extend the already excellent core capabilities of the Tabix indexing scheme to allow for more flexible indexing and filtering (querying) of multiple columns all in one call to Tabby.  
+The idea is to extend the already excellent core capabilities of the Tabix indexing scheme to allow for more flexible indexing and filtering (querying) of multiple columns all in one call to Tabby.   While Tabix only did chromosome + position indexing, Tabby switches that to general indexing + filtering operations that can be used across non-genomic datatypes.  
 
-While Tabix only did chromosome + position indexing, Tabby switches that to general indexing + filtering operations that can be used across non-genomic datatypes.  
+A primary design goal is putting the least amount of burden on the user as possible for small-to-medium sized, row-major data that can fit on one or a few machines (i.e. doesn't truly need a cluster to compute over).
 
-The following 3 main changes are detailed below. 
+Thus, while other tools may boast faster retrieval, better compression,  and/or more extensive filtering/querying expressions (e.g. SQL-support), they do so at the cost of conversion to a non-original, non-flatfile format without default compression (e.g. SQLite/PostgreSQL), non-row-major focus with a more extensive set of dependencies/code (e.g. Parquet), and/or external service subscriptions/opaque implementations (Snowflake/BigQuery/RedShift).
 
-Please keep in mind that you can use any or all of these, they don't require each other necessarily to work.  
+## Why?
+Some might ask what value is there is in doing this.  
+
+Let us start with the following observations about the beneficial features of Tabix as it's currently implemented:
+* Fast random-access, row-based retrieval
+* Compression by default
+* Support for retrieval on remote files on HTTP/HTTPS/S3/GCS stores
+* File format is nearly original (tab-delimited text files compressed using a gzip compatible method)
+
+The key observation here is that we get to essentially keep our original tabular file format, but now have we can do random access queries against a compressed version of it that's stored on an object store (or other remote site) w/o having to download and decompress the full thing ahead of time and without having to write any code to do this.
+
+However, this use case is limited to genomic region-based querying, period.
+
+Might there be other uses for the above benefits, while not being tied to a genomics-region only context? Indeed there are.
+
+The following 3 main features above/beyond Tabix are detailed below. 
+
+Please keep in mind that you can use any or all of these, they don't require each other to work.  
 
 Nor do you need to change an existing Tabix index (`.tbi` file) to use the regular region querying with additional-column filtering.
 
