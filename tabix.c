@@ -2785,6 +2785,22 @@ static int usage(FILE *fp, int status)
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && strcmp(argv[1], "cat") == 0) {
+        printf("\n");
+        printf("      /\\     /\\\n");
+        printf("     (  \\___/  )\n");
+        printf("     (  M   M  )\n");
+        printf("     (  o   o  )\n");
+        printf("      \\   ^   /    ~ meow ~\n");
+        printf("       ) ~|~ (\n");
+        printf("      /  |||  \\\n");
+        printf("     (__|___|__)\n");
+        printf("\n");
+        printf("         tabby\n");
+        printf("\n");
+        return EXIT_SUCCESS;
+    }
+
     int c, detect = 0, min_shift = 0, is_force = 0, list_chroms = 0, do_csi = 0, dump_blocks_flag = 0;
     tbx_conf_t conf = tbx_conf_seqonly;
     char *reheader = NULL;
