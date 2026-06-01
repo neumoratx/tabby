@@ -71,7 +71,7 @@ BUILT_PROGRAMS = \
 	annot-tsv \
 	bgzip \
 	htsfile \
-	tabix
+	tabby
 
 BUILT_TEST_PROGRAMS = \
 	test/hts_endian \
@@ -566,7 +566,7 @@ bgzip: bgzip.o libhts.a
 htsfile: htsfile.o libhts.a
 	$(CC) $(LDFLAGS) -o $@ htsfile.o libhts.a $(LIBS) -lpthread
 
-tabix: tabix.o libhts.a
+tabby: tabix.o libhts.a
 	$(CC) $(LDFLAGS) -o $@ tabix.o libhts.a $(LIBS) -lpthread
 
 ref_cache/ref-cache: $(REF_CACHE_OBJS)

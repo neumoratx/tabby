@@ -401,7 +401,7 @@ static char **parse_regions(char *regions_fname, char **argv, int argc, int *nre
 static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
 {
     if (!expr || !*expr) {
-        fprintf(stderr, "[tabix] -F: empty filter expression\n");
+        fprintf(stderr, "[tabby] -F: empty filter expression\n");
         return -1;
     }
 
@@ -424,18 +424,18 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
                 op_pos = p;
         }
         if (!op_pos) {
-            fprintf(stderr, "[tabix] -F: no operator found in '%s' "
+            fprintf(stderr, "[tabby] -F: no operator found in '%s' "
                             "(expected ==, !=, >=, <=, ~=, or !~)\n", expr);
             return -1;
         }
         size_t name_len = (size_t)(op_pos - expr);
         if (name_len == 0) {
-            fprintf(stderr, "[tabix] -F: empty column spec in '%s'\n", expr);
+            fprintf(stderr, "[tabby] -F: empty column spec in '%s'\n", expr);
             return -1;
         }
         col_name = malloc(name_len + 1);
         if (!col_name) {
-            fprintf(stderr, "[tabix] -F: out of memory\n");
+            fprintf(stderr, "[tabby] -F: out of memory\n");
             return -1;
         }
         memcpy(col_name, expr, name_len);
@@ -443,7 +443,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
         col = -1;
         end = (char *)op_pos;
     } else if (col < 0) {
-        fprintf(stderr, "[tabix] -F: expected non-negative column index at "
+        fprintf(stderr, "[tabby] -F: expected non-negative column index at "
                         "start of '%s'\n", expr);
         return -1;
     }
@@ -458,7 +458,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
     else if (end[0] == '!' && end[1] == '~') { op = FILT_NRE; end += 2; }
     else {
         free(col_name);
-        fprintf(stderr, "[tabix] -F: unrecognised operator in '%s' "
+        fprintf(stderr, "[tabby] -F: unrecognised operator in '%s' "
                         "(expected ==, !=, >=, <=, ~=, or !~)\n", expr);
         return -1;
     }
@@ -467,7 +467,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
      * first and fall back to string. */
     if (!*end) {
         free(col_name);
-        fprintf(stderr, "[tabix] -F: missing value after operator in '%s'\n",
+        fprintf(stderr, "[tabby] -F: missing value after operator in '%s'\n",
                 expr);
         return -1;
     }
@@ -485,7 +485,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
 
         if (is_string && op != FILT_EQ && op != FILT_NE) {
             free(col_name);
-            fprintf(stderr, "[tabix] -F: string filters only support ==, !=, ~=, and !~; "
+            fprintf(stderr, "[tabby] -F: string filters only support ==, !=, ~=, and !~; "
                             "got '%s'\n", expr);
             return -1;
         }
@@ -497,7 +497,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
                                  * sizeof(filter_expr_t));
     if (!tmp) {
         free(col_name);
-        fprintf(stderr, "[tabix] -F: out of memory\n");
+        fprintf(stderr, "[tabby] -F: out of memory\n");
         return -1;
     }
     args->filters = tmp;
@@ -514,7 +514,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
         f->sval = strdup(end);
         if (!f->sval) {
             free(f->col_name); f->col_name = NULL;
-            fprintf(stderr, "[tabix] -F: out of memory\n");
+            fprintf(stderr, "[tabby] -F: out of memory\n");
             return -1;
         }
         if (op == FILT_RE || op == FILT_NRE) {
@@ -522,7 +522,7 @@ static int tbx_parse_filter(args_t *args, const char *expr, int is_or)
             if (rc != 0) {
                 char errbuf[256];
                 regerror(rc, &f->compiled_re, errbuf, sizeof(errbuf));
-                fprintf(stderr, "[tabix] -F: invalid regex '%s': %s\n",
+                fprintf(stderr, "[tabby] -F: invalid regex '%s': %s\n",
                         end, errbuf);
                 free(f->sval);
                 f->sval = NULL;
@@ -614,7 +614,7 @@ static int tbx_apply_filters(const args_t *args,
                     rbuf = malloc(flen + 1);
                     if (!rbuf) {
                         fprintf(stderr,
-                                "[tabix] -F: out of memory for regex match\n");
+                                "[tabby] -F: out of memory for regex match\n");
                         return 0;
                     }
                 }
@@ -642,7 +642,7 @@ static int tbx_apply_filters(const args_t *args,
             char field_buf[64];
             if (flen == 0 || flen >= sizeof(field_buf)) {
                 fprintf(stderr,
-                        "[tabix] -F: column %d value is empty or too long for "
+                        "[tabby] -F: column %d value is empty or too long for "
                         "a numeric filter\n", f->col);
                 return 0;
             }
@@ -654,7 +654,7 @@ static int tbx_apply_filters(const args_t *args,
             double field_val = strtod(field_buf, &nend);
             if (errno || nend == field_buf || *nend != '\0') {
                 fprintf(stderr,
-                        "[tabix] -F: column %d value '%s' is non-numeric; "
+                        "[tabby] -F: column %d value '%s' is non-numeric; "
                         "use == / != for exact string match or ~= / !~ for regex\n",
                         f->col, field_buf);
                 return 0;
@@ -1114,7 +1114,7 @@ static int resolve_filter_col_names(args_t *args, const char *fname,
 
     BGZF *fp = bgzf_open(fname, "r");
     if (!fp) {
-        fprintf(stderr, "[tabix] cannot open '%s' to resolve column names: %s\n",
+        fprintf(stderr, "[tabby] cannot open '%s' to resolve column names: %s\n",
                 fname, strerror(errno));
         return -1;
     }
@@ -1124,7 +1124,7 @@ static int resolve_filter_col_names(args_t *args, const char *fname,
     bgzf_close(fp);
 
     if (ret < 0 || !line.l) {
-        fprintf(stderr, "[tabix] cannot read header line from '%s'\n", fname);
+        fprintf(stderr, "[tabby] cannot read header line from '%s'\n", fname);
         free(line.s);
         return -1;
     }
@@ -1156,7 +1156,7 @@ static int resolve_filter_col_names(args_t *args, const char *fname,
             }
         }
         if (!found) {
-            fprintf(stderr, "[tabix] -F: column name '%s' not found in "
+            fprintf(stderr, "[tabby] -F: column name '%s' not found in "
                             "header of '%s'\n", f->col_name, fname);
             rc = -1;
         }
@@ -1853,14 +1853,14 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
 {
     FILE *sf = fopen(sidx_fname, "rb");
     if (!sf) {
-        fprintf(stderr, "[tabix] sidx_load: cannot open '%s': %s\n",
+        fprintf(stderr, "[tabby] sidx_load: cannot open '%s': %s\n",
                 sidx_fname, strerror(errno));
         return -1;
     }
 
 #define SIDX_READ(ptr, n) do { \
     if (fread((ptr), 1, (size_t)(n), sf) != (size_t)(n)) { \
-        fprintf(stderr, "[tabix] sidx_load: read error in '%s': %s\n", \
+        fprintf(stderr, "[tabby] sidx_load: read error in '%s': %s\n", \
                 sidx_fname, feof(sf) ? "unexpected EOF" : strerror(errno)); \
         fclose(sf); \
         return -1; \
@@ -1871,7 +1871,7 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
     char magic[4];
     SIDX_READ(magic, 4);
     if (magic[0] != 'T' || magic[1] != 'B' || magic[2] != 'A' || magic[3] != '\x02') {
-        fprintf(stderr, "[tabix] sidx_load: bad magic in '%s' "
+        fprintf(stderr, "[tabby] sidx_load: bad magic in '%s' "
                 "(expected 'TBA\\x02', got %02x %02x %02x %02x)\n",
                 sidx_fname,
                 (unsigned char)magic[0], (unsigned char)magic[1],
@@ -1889,7 +1889,7 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
     if (ncols > 0) {
         out->col_min_tc = malloc((size_t)ncols);
         if (!out->col_min_tc) {
-            fprintf(stderr, "[tabix] sidx_load: out of memory\n");
+            fprintf(stderr, "[tabby] sidx_load: out of memory\n");
             fclose(sf);
             return -1;
         }
@@ -1900,7 +1900,7 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
     if (ncols > 0) {
         out->col_max_tc = malloc((size_t)ncols);
         if (!out->col_max_tc) {
-            fprintf(stderr, "[tabix] sidx_load: out of memory\n");
+            fprintf(stderr, "[tabby] sidx_load: out of memory\n");
             fclose(sf);
             return -1;
         }
@@ -1920,7 +1920,7 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
     if (out->nblocks > 0) {
         out->blk_rec_offsets = malloc((size_t)(out->nblocks * sizeof(uint64_t)));
         if (!out->blk_rec_offsets) {
-            fprintf(stderr, "[tabix] sidx_load: out of memory\n");
+            fprintf(stderr, "[tabby] sidx_load: out of memory\n");
             fclose(sf);
             return -1;
         }
@@ -1933,7 +1933,7 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
         if (total_records > 0) {
             out->records = malloc(total_records);
             if (!out->records) {
-                fprintf(stderr, "[tabix] sidx_load: out of memory\n");
+                fprintf(stderr, "[tabby] sidx_load: out of memory\n");
                 fclose(sf);
                 return -1;
             }
@@ -1945,7 +1945,7 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
     if (out->nblocks > 0) {
         out->blk_comp_offsets = malloc((size_t)(out->nblocks * sizeof(uint64_t)));
         if (!out->blk_comp_offsets) {
-            fprintf(stderr, "[tabix] sidx_load: out of memory\n");
+            fprintf(stderr, "[tabby] sidx_load: out of memory\n");
             fclose(sf);
             return -1;
         }
@@ -1956,7 +1956,7 @@ static int sidx_load(const char *sidx_fname, sidx_t *out)
 
     fclose(sf);
 
-    fprintf(stderr, "[tabix] sidx_load: loaded '%s' "
+    fprintf(stderr, "[tabby] sidx_load: loaded '%s' "
             "(%"PRIu32" col(s), %"PRIu64" block(s), %"PRIu64" bytes/record, "
             "max_comp_block=%"PRIu16")\n",
             sidx_fname, out->ncols, out->nblocks, out->rec_len,
@@ -1993,21 +1993,21 @@ static int dump_blocks(const char *fname, int download)
 {
     int ftype = file_type(fname);
     if (!(ftype & IS_TXT) && ftype != 0) {
-        fprintf(stderr, "[tabix] --dump-blocks only supports text (TBI) indexed files\n");
+        fprintf(stderr, "[tabby] --dump-blocks only supports text (TBI) indexed files\n");
         return 1;
     }
 
     /* Load the tabix index so we can resolve tid -> name. */
     tbx_t *tbx = tbx_index_load3(fname, NULL, download ? HTS_IDX_SAVE_REMOTE : 0);
     if (!tbx) {
-        fprintf(stderr, "[tabix] Could not load .tbi index of %s\n", fname);
+        fprintf(stderr, "[tabby] Could not load .tbi index of %s\n", fname);
         return 1;
     }
 
     int nseq = 0;
     const char **seqnames = tbx_seqnames(tbx, &nseq);
     if (!seqnames) {
-        fprintf(stderr, "[tabix] Could not get sequence names\n");
+        fprintf(stderr, "[tabby] Could not get sequence names\n");
         tbx_destroy(tbx);
         return 1;
     }
@@ -2027,7 +2027,7 @@ static int dump_blocks(const char *fname, int download)
     ColStat  *blk_col       = malloc(ncols_cap * sizeof(ColStat));
 
     if (!file_col || !file_col_type || !blk_col) {
-        fprintf(stderr, "[tabix] out of memory\n");
+        fprintf(stderr, "[tabby] out of memory\n");
         free(file_col); free(file_col_type); free(blk_col);
         free(seqnames); tbx_destroy(tbx);
         return 1;
@@ -2055,7 +2055,7 @@ static int dump_blocks(const char *fname, int download)
         ColType *_fct = realloc(file_col_type,  _newcap * sizeof(ColType)); \
         ColStat *_bc  = realloc(blk_col,        _newcap * sizeof(ColStat)); \
         if (!_fc || !_fct || !_bc) { \
-            fprintf(stderr, "[tabix] out of memory\n"); \
+            fprintf(stderr, "[tabby] out of memory\n"); \
             free(_fc  ? _fc  : file_col);       \
             free(_fct ? _fct : file_col_type);  \
             free(_bc  ? _bc  : blk_col);        \
@@ -2079,7 +2079,7 @@ static int dump_blocks(const char *fname, int download)
     {
         BGZF *fp1 = bgzf_open(fname, "r");
         if (!fp1) {
-            fprintf(stderr, "[tabix] Could not open %s (pass 1)\n", fname);
+            fprintf(stderr, "[tabby] Could not open %s (pass 1)\n", fname);
             goto done;
         }
 
@@ -2103,7 +2103,7 @@ static int dump_blocks(const char *fname, int download)
                 size_t newcap = (str.l + 1) * 2;
                 char *nb = realloc(linebuf, newcap);
                 if (!nb) {
-                    fprintf(stderr, "[tabix] out of memory\n");
+                    fprintf(stderr, "[tabby] out of memory\n");
                     bgzf_close(fp1);
                     goto done;
                 }
@@ -2134,7 +2134,7 @@ static int dump_blocks(const char *fname, int download)
         bgzf_close(fp1);
 
         if (ret1 < -1) {
-            fprintf(stderr, "[tabix] Read error during pass 1 of %s\n", fname);
+            fprintf(stderr, "[tabby] Read error during pass 1 of %s\n", fname);
             goto done;
         }
     }
@@ -2181,7 +2181,7 @@ static int dump_blocks(const char *fname, int download)
     int      blk_tids_cap = 16;
     int     *blk_tids     = malloc(blk_tids_cap * sizeof(int));
     if (!blk_tids) {
-        fprintf(stderr, "[tabix] out of memory\n");
+        fprintf(stderr, "[tabby] out of memory\n");
         goto done;
     }
 
@@ -2266,7 +2266,7 @@ static int dump_blocks(const char *fname, int download)
                 while (_newcap < sidx_records_len + (size_t)rec_len) _newcap *= 2; \
                 uint8_t *_nb = realloc(sidx_records, _newcap); \
                 if (!_nb) { \
-                    fprintf(stderr, "[tabix] out of memory (sidx records)\n"); \
+                    fprintf(stderr, "[tabby] out of memory (sidx records)\n"); \
                     goto done; \
                 } \
                 sidx_records = _nb; \
@@ -2278,7 +2278,7 @@ static int dump_blocks(const char *fname, int download)
                 uint64_t *_no = realloc(sidx_offsets, (size_t)_newcap2 * sizeof(uint64_t)); \
                 uint64_t *_nb = realloc(sidx_blk_offsets, (size_t)_newcap2 * sizeof(uint64_t)); \
                 if (!_no || !_nb) { \
-                    fprintf(stderr, "[tabix] out of memory (sidx offsets)\n"); \
+                    fprintf(stderr, "[tabby] out of memory (sidx offsets)\n"); \
                     goto done; \
                 } \
                 sidx_offsets     = _no; \
@@ -2316,7 +2316,7 @@ static int dump_blocks(const char *fname, int download)
 
     BGZF *fp = bgzf_open(fname, "r");
     if (!fp) {
-        fprintf(stderr, "[tabix] Could not open %s (pass 2)\n", fname);
+        fprintf(stderr, "[tabby] Could not open %s (pass 2)\n", fname);
         goto done;
     }
 
@@ -2372,7 +2372,7 @@ static int dump_blocks(const char *fname, int download)
                             blk_tids_cap *= 2;
                             int *tmp = realloc(blk_tids, blk_tids_cap * sizeof(int));
                             if (!tmp) {
-                                fprintf(stderr, "[tabix] out of memory\n");
+                                fprintf(stderr, "[tabby] out of memory\n");
                                 bgzf_close(fp);
                                 goto done;
                             }
@@ -2387,7 +2387,7 @@ static int dump_blocks(const char *fname, int download)
                     size_t newcap = (str.l + 1) * 2;
                     char *nb = realloc(linebuf, newcap);
                     if (!nb) {
-                        fprintf(stderr, "[tabix] out of memory\n");
+                        fprintf(stderr, "[tabby] out of memory\n");
                         bgzf_close(fp);
                         goto done;
                     }
@@ -2470,7 +2470,7 @@ static int dump_blocks(const char *fname, int download)
         uint8_t *col_min_tc = malloc(ncols > 0 ? (size_t)ncols : 1);
         uint8_t *col_max_tc = malloc(ncols > 0 ? (size_t)ncols : 1);
         if (!col_min_tc || !col_max_tc) {
-            fprintf(stderr, "[tabix] out of memory (sidx header)\n");
+            fprintf(stderr, "[tabby] out of memory (sidx header)\n");
             free(col_min_tc); free(col_max_tc);
             goto done;
         }
@@ -2483,7 +2483,7 @@ static int dump_blocks(const char *fname, int download)
         size_t fnlen = strlen(fname);
         char *sidx_fname = malloc(fnlen + 6);
         if (!sidx_fname) {
-            fprintf(stderr, "[tabix] out of memory (sidx filename)\n");
+            fprintf(stderr, "[tabby] out of memory (sidx filename)\n");
             free(col_min_tc); free(col_max_tc);
             goto done;
         }
@@ -2492,7 +2492,7 @@ static int dump_blocks(const char *fname, int download)
 
         FILE *sf = fopen(sidx_fname, "wb");
         if (!sf) {
-            fprintf(stderr, "[tabix] Could not open %s for writing: %s\n",
+            fprintf(stderr, "[tabby] Could not open %s for writing: %s\n",
                     sidx_fname, strerror(errno));
             free(col_min_tc); free(col_max_tc); free(sidx_fname);
             goto done;
@@ -2500,7 +2500,7 @@ static int dump_blocks(const char *fname, int download)
 
 #define SIDX_WRITE(ptr, n) do { \
     if (fwrite((ptr), 1, (n), sf) != (size_t)(n)) { \
-        fprintf(stderr, "[tabix] Write error on %s: %s\n", sidx_fname, strerror(errno)); \
+        fprintf(stderr, "[tabby] Write error on %s: %s\n", sidx_fname, strerror(errno)); \
         fclose(sf); free(col_min_tc); free(col_max_tc); free(sidx_fname); \
         goto done; \
     } \
@@ -2553,7 +2553,7 @@ static int dump_blocks(const char *fname, int download)
 #undef SIDX_WRITE
 
         fclose(sf);
-        fprintf(stderr, "[tabix] wrote secondary index: %s "
+        fprintf(stderr, "[tabby] wrote secondary index: %s "
                 "(%d col(s), %"PRIu64" block(s), %"PRIu64" bytes/record, "
                 "max_comp_block=%"PRIu16", compressed_offsets included)\n",
                 sidx_fname, ncols, sidx_nblocks, rec_len, max_comp_block_size);
@@ -2737,7 +2737,7 @@ static int usage(FILE *fp, int status)
 {
     fprintf(fp, "\n");
     fprintf(fp, "Version: %s\n", hts_version());
-    fprintf(fp, "Usage:   tabix [OPTIONS] [FILE] [REGION [...]]\n");
+    fprintf(fp, "Usage:   tabby [OPTIONS] [FILE] [REGION [...]]\n");
     fprintf(fp, "\n");
     fprintf(fp, "Indexing Options:\n");
     fprintf(fp, "   -0, --zero-based           coordinates are zero-based\n");
@@ -2777,7 +2777,7 @@ static int usage(FILE *fp, int status)
     fprintf(fp, "The default preset is 'seqonly': indexes tab-delimited files by\n");
     fprintf(fp, "sequence/chromosome name only. No start/end coordinate columns are\n");
     fprintf(fp, "needed. Use -s to specify the chromosome column (default: 1).\n");
-    fprintf(fp, "Query with a bare name: tabix FILE chr1\n");
+    fprintf(fp, "Query with a bare name: tabby FILE chr1\n");
     fprintf(fp, "Use -p gff/bed/sam/vcf to index coordinate-based files.\n");
     fprintf(fp, "\n");
     return status;
@@ -2885,7 +2885,7 @@ int main(int argc, char *argv[])
                 break;
             case 1:
                 printf(
-"tabix (htslib) %s\n"
+"Tabby (htslib) %s\n"
 "Copyright (C) 2025 Genome Research Ltd.\n", hts_version());
                 return EXIT_SUCCESS;
             case 2:
@@ -3020,7 +3020,7 @@ int main(int argc, char *argv[])
         // that tabix failed
         stat(fname, &stat_file);
         if ( stat_file.st_mtime <= stat_tbi.st_mtime )
-            error("[tabix] the index file exists. Please use '-f' to overwrite.\n");
+            error("[tabby] the index file exists. Please use '-f' to overwrite.\n");
     }
     free(idx_fname);
 
@@ -3048,7 +3048,7 @@ int main(int argc, char *argv[])
             case 0:
                 return 0;
             case -2:
-                error("[tabix] the compression of '%s' is not BGZF\n", fname);
+                error("[tabby] the compression of '%s' is not BGZF\n", fname);
             default:
                 error("tbx_index_build3 failed: %s\n", fname);
         }
@@ -3061,7 +3061,7 @@ int main(int argc, char *argv[])
             case 0:
                 return 0;
             case -2:
-                error("[tabix] the compression of '%s' is not BGZF\n", fname);
+                error("[tabby] the compression of '%s' is not BGZF\n", fname);
             default:
                 error("tbx_index_build3 failed: %s\n", fname);
         }

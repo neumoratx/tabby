@@ -26,7 +26,7 @@
 
 set -u
 
-TABIX="./tabix"
+TABIX="./tabby"
 BGZIP="./bgzip"
 TMP="${TMPDIR:-/tmp}/sidx_test_$$"
 
