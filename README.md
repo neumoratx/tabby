@@ -6,16 +6,26 @@ The idea is to extend the already excellent core capabilities of the Tabix index
 
 While Tabix only did chromosome + position indexing, Tabby switches that to general indexing + filtering operations that can be used across non-genomic datatypes.  
 
-As such, Tabby supports indexing on a single column instead of the chromosome + start + end normally required Tabix (`-p seqonly`).  This was a simple modification to leverage the existing b-tree index used for the chromosome and apply it instead to any column that you've already sorted on, no longer needing a position column as well.
+## Single Column Indexing
+Tabby by default supports indexing on a single column instead of the chromosome + start + end normally required Tabix (`-p seqonly` instead of `-s 1 -b 2 -e 3`).  
 
-Further, Tabby adds support for one or more additional filters on the columns in the file, supporting both numeric (equal `==`, not-equal `!=`, greater-than-equal `>=`, lesser-than-equal `<=`) and string operations (equal `==`, not-equal `!=`, and basic regex: `~=`  and/or `!~`).  Logical ANDing between `-F` specificed filters is the default, while if a filter is specified as `-O` it's treated as a logical OR.
+This was a simple modification to leverage the existing b-tree index used for the chromosome and apply it instead to any column that you've already sorted on, no longer needing a position column as well.
 
+While simple to make, this change allows a lot more flexibility w/o resorting to crude hacks where a "stub" column for a position is added to the file and the chromosome column is overriden to your desired column to index on.
+
+One common use case (at least of the author) is doing this for gene names or gene IDs, instead of their coordinates.
+
+## Multi-Column Filtering
+Tabby also adds support for one or more additional filters on the columns in the file, supporting both numeric (equal `==`, not-equal `!=`, greater-than-equal `>=`, lesser-than-equal `<=`) and string operations (equal `==`, not-equal `!=`, and basic regex: `~=`  and/or `!~`).  
+
+Both AND (`-F`) and OR (`-O`) are supported when specifying a specific filter.
+
+## Secondary Index Across All Numeric Columns
 An additional important, but more "under-the-hood" feature that Tabby has beyond Tabix, is that while the above filtering will work on a normal bgzipped file with normal tabix index, Tabby now supports the generation of a secondary index (`sidx`) which stores additional information across all the numeric columns (not applicable to string columns).  This secondary index specifically tracks the min/max values of each numeric column across each compressed block in the block-gzip.  
 
 Behond providing potentially useful information about the structure of the original file + index, when a numeric filter is applied and the secondary index exists, Tabby can leverage this to drop blocks (and potentially chunks of the file in a remote file context, *if* the chunk has *no* blocks which match any of the query/filters) from processing (decompressing + reading line-by-line).
 
 This can potentially speed up processing by further pruning out whole blocks (or even whole chunks) from consideration*.
-
 
 All that to say, Tabby is *not* making any major performance enhancement(s) to the core htslib code. 
 
