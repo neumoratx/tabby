@@ -8,6 +8,8 @@ A primary design goal is putting the least amount of burden on the user as possi
 
 Thus, while other tools may boast faster retrieval, better compression,  and/or more extensive filtering/querying expressions (e.g. SQL-support), they do so at the cost of conversion to a non-original, non-flatfile format without default compression (e.g. SQLite/PostgreSQL), non-row-major focus with a more extensive set of dependencies/code (e.g. Parquet), and/or external service subscriptions/opaque implementations (Snowflake/BigQuery/RedShift).
 
+NOTE: an LLM did most/all code changes, though under careful human scrutiny and constantly human-guided over many prompts.
+
 ## Why?
 Some might ask what value is there is in doing this.  
 
