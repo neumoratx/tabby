@@ -80,6 +80,7 @@ cleanup() {
     rm -f sidx_same.tsv sidx_same.tsv.gz sidx_same.tsv.gz.tbi sidx_same.tsv.gz.sidx
     rm -f sidx_seqonly.tsv sidx_seqonly.tsv.gz sidx_seqonly.tsv.gz.tbi
     rm -f sidx_named.tsv sidx_named.tsv.gz sidx_named.tsv.gz.tbi sidx_named.tsv.gz.sidx
+    rm -f sidx_coords.tsv sidx_coords.tsv.gz sidx_coords.tsv.gz.tbi
     rm -f sidx_notbi.tsv.gz
     rm -f sidx_dump.out sidx_types_dump.out sidx_same_dump.out
     rm -f sidx_exp_*.tsv
@@ -726,6 +727,76 @@ check_out "column-name whole-file scan (TYPE==rRNA)" \
 # Unknown column name → non-zero exit.
 check_fail "unknown column name exits with error (MISSINGCOL==X)" \
     "$TABIX" -F "MISSINGCOL==X" sidx_named.tsv.gz chr1:1-3
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 12: Coordinate-based indexing (-s/-b/-e, no -p) with -F/-O filters
+#
+#   Regression guard for the "seqonly-is-default" change.  Providing -b or -e
+#   must clear TBX_SEQONLY so that records are indexed at their real coordinates
+#   and coordinate-range queries find them.  This section explicitly creates a
+#   file, indexes it with -s -b -e (no -p flag), and verifies that -F and -O
+#   filters work correctly alongside coordinate-range queries.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 12: coordinate-based (-s/-b/-e) indexing with -F/-O ---"
+
+# Small coordinate-based test file (no comment lines, no header).
+# 5 columns (0-based): CHROM  POS  END  NAME  SCORE
+# chr1 rows: SCORE in {10, 50}; chr2 rows: SCORE in {75, 90}.
+printf 'chr1\t100\t200\tA\t10\n' >  sidx_coords.tsv
+printf 'chr1\t300\t400\tB\t50\n' >> sidx_coords.tsv
+printf 'chr1\t500\t600\tC\t10\n' >> sidx_coords.tsv
+printf 'chr2\t100\t200\tD\t75\n' >> sidx_coords.tsv
+printf 'chr2\t300\t400\tE\t90\n' >> sidx_coords.tsv
+
+$BGZIP -c sidx_coords.tsv > sidx_coords.tsv.gz  || die "bgzip sidx_coords"
+# No -p flag: default preset is seqonly, but -b/-e clears TBX_SEQONLY so
+# records are indexed at their actual POS/END coordinates.
+$TABIX -f -s 1 -b 2 -e 3 sidx_coords.tsv.gz    || die "tabix index sidx_coords"
+
+# ── Expected output files ──
+awk '$4=="B"'                  sidx_coords.tsv > sidx_exp_coords_B.tsv
+awk '$4=="A"'                  sidx_coords.tsv > sidx_exp_coords_A.tsv
+awk '$4=="A" || $4=="C"'       sidx_coords.tsv > sidx_exp_coords_AC.tsv
+awk '$1=="chr1" && $5>=50'     sidx_coords.tsv > sidx_exp_coords_chr1_ge50.tsv
+awk '$1=="chr1" && $5==10'     sidx_coords.tsv > sidx_exp_coords_chr1_s10.tsv
+awk '$5>=50'                   sidx_coords.tsv > sidx_exp_coords_ge50.tsv
+
+# ── Sanity check: query that only resolves via real coordinates.
+# In seqonly mode records sit at [0,1); chr1:300-400 (0-based [299,400)) does
+# NOT overlap [0,1), so seqonly mode returns nothing.  Coordinate mode finds
+# row B (POS=300, END=400) — confirming TBX_SEQONLY was cleared by -b/-e.
+check_out "coord-indexed: coordinate-range chr1:300-400 finds row B" \
+    sidx_exp_coords_B.tsv \
+    "$TABIX" sidx_coords.tsv.gz chr1:300-400
+
+# Numeric -F filter within a coordinate-range query.
+# chr1:1-9999 returns all chr1 rows; SCORE>=50 keeps only row B.
+check_out "coord-indexed: numeric FILT_GE with coord region (4>=50)" \
+    sidx_exp_coords_chr1_ge50.tsv \
+    "$TABIX" -F "4>=50" sidx_coords.tsv.gz chr1:1-9999
+
+# String -F filter within a coordinate-range query.
+check_out "coord-indexed: string FILT_EQ with coord region (3==A)" \
+    sidx_exp_coords_A.tsv \
+    "$TABIX" -F "3==A" sidx_coords.tsv.gz chr1:1-9999
+
+# -O OR filter within a coordinate-range query.
+check_out "coord-indexed: -O OR filter with coord region (3==A OR 3==C)" \
+    sidx_exp_coords_AC.tsv \
+    "$TABIX" -O "3==A" -O "3==C" sidx_coords.tsv.gz chr1:1-9999
+
+# Combined -F AND + -O OR: CHROM==chr1 (AND) with SCORE==10 OR SCORE==90 (OR).
+# chr1 rows: A(score=10) passes both; B(score=50) fails OR; C(score=10) passes.
+check_out "coord-indexed: -F AND + -O OR with coord region" \
+    sidx_exp_coords_chr1_s10.tsv \
+    "$TABIX" -F "0==chr1" -O "4==10" -O "4==90" sidx_coords.tsv.gz chr1:1-9999
+
+# Whole-file -F scan on coordinate-indexed file (no region argument).
+check_out "coord-indexed: whole-file -F scan (4>=50)" \
+    sidx_exp_coords_ge50.tsv \
+    "$TABIX" -F "4>=50" sidx_coords.tsv.gz
 
 echo ""
 
