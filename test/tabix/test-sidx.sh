@@ -801,6 +801,56 @@ check_out "coord-indexed: whole-file -F scan (4>=50)" \
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SECTION 13: Cross-compatibility — .tbi from upstream (unmodified) tabix
+#
+#   A .tbi index created by any recent upstream tabix (using -s/-b/-e) must be
+#   fully usable by our tabby with -F/-O filters.  Upstream tabix never sets
+#   TBX_SEQONLY in the preset, so tabby should load the index, see no seqonly
+#   flag, and apply coordinate-range queries + row-level filters correctly.
+#   There will be no .sidx alongside the index, so tabby falls back to
+#   row-level-only filtering — the results must still be correct.
+#
+#   This section runs only when an upstream-equivalent tabix binary is present
+#   at ./tabix (the pre-rename binary left in the repo directory during
+#   development).  In clean build environments it is silently skipped.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Section 13: cross-compat (.tbi from upstream tabix + tabby filters) ---"
+
+UPSTREAM_TABIX="./tabix"
+if [ ! -x "$UPSTREAM_TABIX" ]; then
+    echo "  (skipped: $UPSTREAM_TABIX not present)"
+else
+    # Re-index sidx_coords.tsv.gz using the upstream tabix binary.
+    # No .sidx is produced; tabby must fall back to row-level filtering.
+    "$UPSTREAM_TABIX" -f -s 1 -b 2 -e 3 sidx_coords.tsv.gz \
+        || die "upstream tabix indexing failed"
+
+    # Sanity: coordinate-range query at chr1:300-400 must find row B.
+    # In seqonly mode records sit at [0,1), so this range returns nothing —
+    # a pass here proves TBX_SEQONLY is not set in the upstream-produced .tbi.
+    check_out "cross-compat: upstream .tbi, coordinate-range query (no filter)" \
+        sidx_exp_coords_B.tsv \
+        "$TABIX" sidx_coords.tsv.gz chr1:300-400
+
+    # Numeric -F filter on upstream-indexed file + coordinate region.
+    check_out "cross-compat: upstream .tbi + -F FILT_GE (4>=50)" \
+        sidx_exp_coords_chr1_ge50.tsv \
+        "$TABIX" -F "4>=50" sidx_coords.tsv.gz chr1:1-9999
+
+    # -O OR filter on upstream-indexed file + coordinate region.
+    check_out "cross-compat: upstream .tbi + -O OR filter (3==A OR 3==C)" \
+        sidx_exp_coords_AC.tsv \
+        "$TABIX" -O "3==A" -O "3==C" sidx_coords.tsv.gz chr1:1-9999
+
+    # Whole-file -F scan on upstream-indexed file (no region argument).
+    check_out "cross-compat: upstream .tbi + whole-file -F scan (4>=50)" \
+        sidx_exp_coords_ge50.tsv \
+        "$TABIX" -F "4>=50" sidx_coords.tsv.gz
+fi
+
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Expected   passes:   $_np"
