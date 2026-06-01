@@ -6,6 +6,12 @@ The idea is to extend the already excellent core capabilities of the Tabix index
 
 While Tabix only did chromosome + position indexing, Tabby switches that to general indexing + filtering operations that can be used across non-genomic datatypes.  
 
+The following 3 main changes are detailed below. 
+
+Please keep in mind that you can use any or all of these, they don't require each other necessarily to work.  
+
+Nor do you need to change an existing Tabix index (`.tbi` file) to use the regular region querying with additional-column filtering.
+
 ## Single Column Indexing
 Tabby by default supports indexing on a single column instead of the chromosome + start + end normally required Tabix (`-p seqonly` instead of `-s 1 -b 2 -e 3`).  
 
